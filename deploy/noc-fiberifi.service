@@ -1,0 +1,33 @@
+[Unit]
+Description=Fiberifi NOC panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=noc
+Group=noc
+WorkingDirectory=/opt/noc-fiberifi
+EnvironmentFile=/etc/noc-fiberifi.env
+ExecStart=/usr/bin/env node --disable-warning=ExperimentalWarning src/server.js
+Restart=on-failure
+RestartSec=3
+
+# Sandbox: the app can write to its data folder and nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/noc-fiberifi
+
+[Install]
+WantedBy=multi-user.target

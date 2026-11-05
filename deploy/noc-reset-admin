@@ -1,0 +1,10 @@
+#!/bin/sh
+# Prints a one-time password for an admin account: sudo noc-reset-admin [email]
+set -eu
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Run this with sudo." >&2
+  exit 1
+fi
+cd /opt/noc-fiberifi
+exec runuser -u noc -- env DATA_DIR=/var/lib/noc-fiberifi \
+  node --disable-warning=ExperimentalWarning src/reset-admin.js "$@"

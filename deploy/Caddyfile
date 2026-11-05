@@ -1,0 +1,5 @@
+# noc-fiberifi: managed by deploy/install.sh
+__DOMAIN__ {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3100
+}
