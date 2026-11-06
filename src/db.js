@@ -273,6 +273,12 @@ const MIGRATIONS = [
       );
     `);
   },
+
+  // 7: changes an admin deleted from the queue. The queue is worked out fresh each time, so without this
+  // a deleted change would just come back.
+  (db) => {
+    db.exec('CREATE TABLE router_dismissed (change_id TEXT PRIMARY KEY)');
+  },
 ];
 
 export function migrate(db) {

@@ -25,6 +25,18 @@ export function routerRoutes({ monitor, sync, audit }) {
 
   router.get('/sync/plan', async (req, res) => res.json(await sync.plan()));
 
+  router.post('/sync/dismiss', async (req, res) => {
+    const change = await sync.dismiss(req.body?.id);
+    audit(req, 'router.sync_dismiss', change.address, change.op);
+    res.json({ ok: true });
+  });
+
+  router.post('/sync/restore', (req, res) => {
+    sync.restore(req.body?.id);
+    audit(req, 'router.sync_restore', String(req.body?.id ?? ''));
+    res.json({ ok: true });
+  });
+
   // Changes a live core router, so it asks for the password again even in a signed-in session.
   router.post('/sync/apply', async (req, res) => {
     if (!applyAttempts.allow(req.user.id)) throw new ApiError(429, 'rate_limited', 'Too many attempts. Wait a minute and try again.');

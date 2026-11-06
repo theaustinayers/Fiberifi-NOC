@@ -1,6 +1,7 @@
 // The drill-down on the Prefixes page: open a range into smaller blocks, all the way to single addresses.
 // Blocks do not have to exist as prefixes. They are worked out on the server from what is assigned right now.
 import { descriptionOf, editAddress, removePtrButton, rowClass, statusCell } from './addresses.js';
+import { offerRouterApply } from './views-sync.js';
 import { badge, formDialog, get, go, h, icon, meter, plural, post, toast } from './lib.js';
 
 const REFRESH_MS = 15000;
@@ -92,6 +93,7 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
     });
     if (created) {
       toast(`Created ${created.cidr}`);
+      await offerRouterApply(created.cidr);
       render();
     }
   }

@@ -1,6 +1,7 @@
 import { addressTable } from './addresses.js';
 import { explorerTable } from './explorer.js';
 import { snmpPanel } from './views-routers.js';
+import { offerRouterApply } from './views-sync.js';
 import { accessBadge, memberFields } from './team.js';
 import {
   badge,
@@ -318,6 +319,7 @@ async function allocateDialog(prefix, reload, presetCidr = '') {
   });
   if (created) {
     toast(`Allocated ${created.cidr}`);
+    await offerRouterApply(created.cidr);
     reload();
   }
 }
@@ -343,6 +345,7 @@ async function assignDialog(prefix, reload) {
   });
   if (done) {
     toast(`Assigned ${prefix.cidr}`);
+    await offerRouterApply(prefix.cidr);
     reload();
   }
 }
@@ -363,6 +366,7 @@ async function releaseDialog(prefix, reload) {
   });
   if (done) {
     toast(`Released ${prefix.cidr}`);
+    await offerRouterApply(prefix.cidr);
     reload();
   }
 }
@@ -380,6 +384,7 @@ async function unassignDialog(prefix, reload) {
   if (done) {
     toast(`Unassigned ${prefix.cidr}`);
     reportPtr(done);
+    await offerRouterApply(prefix.cidr);
     reload();
   }
 }
@@ -422,6 +427,7 @@ async function editDialog(prefix, reload) {
   });
   if (done) {
     toast('Saved');
+    await offerRouterApply(done.prefix.cidr);
     reload();
   }
 }
@@ -443,6 +449,7 @@ async function deleteDialog(prefix) {
   if (done) {
     toast(`Deleted ${prefix.cidr}`);
     reportPtr(done);
+    await offerRouterApply(prefix.cidr, { nested: cascade });
     go('/prefixes');
   }
 }

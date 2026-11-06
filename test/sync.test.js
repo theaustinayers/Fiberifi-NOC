@@ -215,6 +215,46 @@ describe('router changes', () => {
     assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM router_addresses WHERE address = '206.168.245.49/29'`).get().n, 0);
   });
 
+  test('a change deleted from the queue stays gone, and cannot be applied', async () => {
+    const carved = ipam.carve({ cidr: '206.168.245.64/29', customerId: customer, datacenterId: dc });
+    const id = 'add:206.168.245.65/29';
+    assert.ok(ids(await sync.plan()).includes(id));
+
+    await sync.dismiss(id);
+    const plan = await sync.plan();
+    assert.ok(!ids(plan).includes(id));
+    assert.deepEqual(plan.dismissed.map((c) => c.id), [id]);
+    assert.ok(!(await sync.plan()).changes.some((c) => c.id === id), 'still gone on the next look');
+    await assert.rejects(sync.apply([id]), { code: 'plan_changed' });
+    assert.ok(!router.addresses.has('206.168.245.65/29'));
+
+    sync.restore(id);
+    assert.ok(ids(await sync.plan()).includes(id), 'restoring brings it back');
+
+    await sync.dismiss(id);
+    ipam.unassignPrefix(carved.id);
+    ipam.applyDelete(ipam.planDelete(carved.id, false));
+    assert.deepEqual((await sync.plan()).dismissed, [], 'forgotten once it no longer applies');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM router_dismissed').get().n, 0);
+  });
+
+  test('deleting a removal from the queue leaves the address on the router', async () => {
+    const carved = ipam.carve({ cidr: '206.168.245.72/29', customerId: customer, datacenterId: dc });
+    await sync.apply(['add:206.168.245.73/29']);
+    ipam.unassignPrefix(carved.id);
+    await sync.dismiss('remove:206.168.245.73/29');
+    assert.ok(router.addresses.has('206.168.245.73/29'));
+    assert.ok(!ids(await sync.plan()).includes('remove:206.168.245.73/29'));
+    sync.restore('remove:206.168.245.73/29');
+    await sync.apply(['remove:206.168.245.73/29']);
+    ipam.applyDelete(ipam.planDelete(carved.id, false));
+  });
+
+  test('only a change in the queue can be deleted from it', async () => {
+    await assert.rejects(sync.dismiss('remove:206.168.244.1/22'), { code: 'plan_changed' });
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM router_dismissed').get().n, 0);
+  });
+
   test('a router that cannot be reached is reported, and a batch is limited', async () => {
     router.fail = true;
     await assert.rejects(sync.plan(), { code: 'router_error' });

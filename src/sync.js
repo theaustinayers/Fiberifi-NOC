@@ -162,8 +162,25 @@ export function createSync(db, config, ipam) {
       if (!onRouter.has(address) && !desired.has(address)) db.prepare('DELETE FROM router_addresses WHERE address = ?').run(address);
     }
 
-    const sorted = changes.sort((a, b) => toHex(parseIp(a.address.split('/')[0]).value).localeCompare(toHex(parseIp(b.address.split('/')[0]).value)));
-    return { interface: s.interface, addresses: actual, changes: sorted.map((c) => ({ ...c, command: commandFor(c, s.interface) })), conflicts, unknown, noDatacenter };
+    const sorted = changes
+      .sort((a, b) => toHex(parseIp(a.address.split('/')[0]).value).localeCompare(toHex(parseIp(b.address.split('/')[0]).value)))
+      .map((c) => ({ ...c, command: commandFor(c, s.interface) }));
+
+    // A deleted change stays deleted only while it would otherwise be offered. Once the panel and the
+    // router agree again it is forgotten, so the same address can come up fresh later.
+    const dismissed = new Set(db.prepare('SELECT change_id FROM router_dismissed').all().map((row) => row.change_id));
+    for (const id of dismissed) {
+      if (!sorted.some((c) => c.id === id)) db.prepare('DELETE FROM router_dismissed WHERE change_id = ?').run(id);
+    }
+    return {
+      interface: s.interface,
+      addresses: actual,
+      changes: sorted.filter((c) => !dismissed.has(c.id)),
+      dismissed: sorted.filter((c) => dismissed.has(c.id)),
+      conflicts,
+      unknown,
+      noDatacenter,
+    };
   }
 
   function commandFor(change, iface) {
@@ -205,5 +222,17 @@ export function createSync(db, config, ipam) {
     });
   }
 
-  return { settings, saveSettings, clearKey, testConnection, plan, apply };
+  async function dismiss(id) {
+    const current = await plan();
+    const change = current.changes.find((c) => c.id === id);
+    if (!change) throw new ApiError(409, 'plan_changed', 'That change is no longer in the queue. Review the list again.');
+    db.prepare('INSERT OR IGNORE INTO router_dismissed (change_id) VALUES (?)').run(id);
+    return change;
+  }
+
+  function restore(id) {
+    db.prepare('DELETE FROM router_dismissed WHERE change_id = ?').run(String(id));
+  }
+
+  return { settings, saveSettings, clearKey, testConnection, plan, apply, dismiss, restore };
 }
