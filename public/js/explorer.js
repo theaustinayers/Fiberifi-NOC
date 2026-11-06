@@ -1,6 +1,6 @@
 // The drill-down on the Prefixes page: open a range into smaller blocks, all the way to single addresses.
 // Blocks do not have to exist as prefixes. They are worked out on the server from what is assigned right now.
-import { editAddress, removePtrButton, rowClass, STATUS } from './addresses.js';
+import { editAddress, removePtrButton, rowClass, statusCell } from './addresses.js';
 import { badge, formDialog, get, go, h, icon, meter, plural, post, toast } from './lib.js';
 
 const REFRESH_MS = 15000;
@@ -171,7 +171,6 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
         h('td', { class: 'right' }, row.rdns ? removePtrButton(row.prefixId, row, render) : ''),
       );
     }
-    const status = row.record ? STATUS[row.record.status] : null;
     return h(
       'tr',
       { class: rowClass(row) },
@@ -181,7 +180,7 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
         indent(depth + 1),
         h('button', { class: 'cell-link mono', type: 'button', onClick: () => editAddress(row.prefixId, row, render) }, row.ip),
       ),
-      h('td', null, row.role ? badge(ROLE_LABEL[row.role], 'brand') : status ? badge(status[0], status[1]) : h('span', { class: 'muted' }, 'Free')),
+      h('td', null, statusCell(row)),
       h('td', { colSpan: 2 }, row.customer ? customerLink(row.customer) : row.internal ? INTERNAL : ''),
       h('td', { class: 'break' }, row.record?.description ?? ''),
       h('td', { class: 'mono', colSpan: 2 }, row.record?.hostname ?? ''),

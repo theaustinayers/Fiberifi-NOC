@@ -33,6 +33,19 @@ export function rowClass(row) {
   return row.record || row.rdns || row.role ? '' : 'free';
 }
 
+// What an address is, in one place, so the table and the dialog can never disagree.
+function statusOf(row) {
+  if (row.record) return row.record.status;
+  return row.rdns ? 'in_use' : 'free';
+}
+
+export function statusCell(row) {
+  if (row.role) return badge(ROLE_LABEL[row.role], 'brand');
+  const status = statusOf(row);
+  if (status === 'free') return h('span', { class: 'muted' }, 'Free');
+  return badge(STATUS[status][0], STATUS[status][1]);
+}
+
 // A sync can import a PTR onto a blocked address, so admins get a way to clear it.
 export function removePtrButton(subnetId, row, reload) {
   return h(
@@ -60,7 +73,7 @@ export function editAddress(subnetId, row, onChange) {
   };
   const initial = {
     hostname: record.hostname ?? '',
-    status: record.status ?? 'in_use',
+    status: statusOf(row),
     description: record.description ?? '',
     device: record.device ?? '',
     mac: record.mac ?? '',
@@ -76,14 +89,17 @@ export function editAddress(subnetId, row, onChange) {
   // One save for the whole address, so nothing typed in one half is lost by saving the other.
   async function save(values, close) {
     const { ptr, ...fields } = values;
-    const recordChanged = Object.keys(initial).some((key) => fields[key].trim() !== initial[key]);
+    const edited = Object.keys(initial).some((key) => fields[key].trim() !== initial[key]);
+    const hasDetails = ['hostname', 'description', 'device', 'mac'].some((key) => fields[key].trim());
     const ptrValue = ptr.trim();
     const ptrChanged = session.rdnsEnabled && ptrValue !== ptrInitial;
-    const blank = !fields.hostname.trim() && !fields.description.trim() && !fields.device.trim() && !fields.mac.trim() && fields.status === 'in_use';
 
+    // Free means no record. Details typed into a free address make it In use, rather than being thrown away.
+    const clearing = fields.status === 'free' && (Boolean(row.record) || !hasDetails);
+    const recordChanged = clearing ? Boolean(row.record) : edited;
     if (recordChanged) {
-      if (blank) await del(addressUrl(subnetId, row.ip));
-      else await put(addressUrl(subnetId, row.ip), fields);
+      if (clearing) await del(addressUrl(subnetId, row.ip));
+      else await put(addressUrl(subnetId, row.ip), { ...fields, status: fields.status === 'free' ? 'in_use' : fields.status });
     }
     if (ptrChanged) {
       try {
@@ -116,7 +132,8 @@ export function editAddress(subnetId, row, onChange) {
               label: 'Status',
               type: 'select',
               value: initial.status,
-              options: Object.entries(STATUS).map(([value, [label]]) => ({ value, label })),
+              options: [{ value: 'free', label: 'Free' }, ...Object.entries(STATUS).map(([value, [label]]) => ({ value, label }))],
+              hint: row.record ? 'Free clears this record.' : null,
             },
           ],
           { name: 'description', label: 'Description', value: initial.description },
@@ -142,7 +159,6 @@ export function editAddress(subnetId, row, onChange) {
 }
 
 function rowFor(subnetId, row, reload) {
-  const statusInfo = row.record ? STATUS[row.record.status] : null;
   if (row.locked) {
     return h(
       'tr',
@@ -158,7 +174,6 @@ function rowFor(subnetId, row, reload) {
         ),
     );
   }
-  const free = !row.record && !row.rdns;
   return h(
     'tr',
     { class: rowClass(row) },
@@ -173,7 +188,7 @@ function rowFor(subnetId, row, reload) {
     ),
     h('td', { class: 'mono' }, row.record?.hostname ?? ''),
     h('td', { class: 'break' }, row.record?.description ?? ''),
-    h('td', null, row.role ? badge(ROLE_LABEL[row.role], 'brand') : statusInfo ? badge(statusInfo[0], statusInfo[1]) : free ? h('span', { class: 'muted' }, 'Free') : ''),
+    h('td', null, statusCell(row)),
     h('td', { class: 'mono nowrap' }, row.record?.mac ?? ''),
     h('td', { class: 'mono break' }, row.rdns?.hostname ?? ''),
   );

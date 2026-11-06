@@ -231,6 +231,18 @@ describe('NOC API', () => {
     assert.equal(outside.status, 400);
   });
 
+  test('an address can be marked in use with nothing else, and no PTR', async () => {
+    const { data: list } = await acme.get('/api/subnets');
+    const id = list.subnets[0].id;
+    const res = await acme.put(`/api/subnets/${id}/addresses/149.112.89.5`, { status: 'in_use', hostname: '', description: '', device: '', mac: '' });
+    assert.equal(res.status, 200, JSON.stringify(res.data));
+    const { data } = await acme.get(`/api/subnets/${id}/addresses`);
+    const row = data.rows.find((r) => r.ip === '149.112.89.5');
+    assert.equal(row.record.status, 'in_use');
+    assert.equal(row.rdns, null);
+    assert.equal((await acme.delete(`/api/subnets/${id}/addresses/149.112.89.5`)).status, 200);
+  });
+
   test('rDNS reports clearly when Cloudflare is not set up', async () => {
     const { data: list } = await acme.get('/api/subnets');
     const res = await acme.put(`/api/subnets/${list.subnets[0].id}/rdns/149.112.89.2`, { hostname: 'mail.acme.example' });
