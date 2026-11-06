@@ -2,7 +2,11 @@ import { lineChart } from './chart.js';
 import { badge, buildForm, confirmDialog, del, emptyState, formDialog, get, go, h, icon, notice, pageHead, panel, patch, post, put, table, toast, when } from './lib.js';
 
 const REFRESH_MS = 15000;
-const RANGES = [['1h', '1 hour'], ['6h', '6 hours'], ['24h', '24 hours'], ['7d', '7 days'], ['30d', '30 days']];
+const RANGES = [['5m', '5 minutes'], ['15m', '15 minutes'], ['1h', '1 hour'], ['6h', '6 hours'], ['24h', '24 hours'], ['7d', '7 days'], ['30d', '30 days']];
+const LIVE_RANGES = [['live', 'Realtime'], ...RANGES];
+// Six, not five: see LIVE_MIN_MS in monitor.js.
+const LIVE_MS = 6000;
+const LIVE_POINTS = 60;
 
 export function formatBits(bps) {
   if (bps === null || bps === undefined) return '—';
@@ -23,6 +27,7 @@ function formatSpeed(mbps) {
 
 function formatUptime(seconds) {
   if (seconds === null || seconds === undefined) return '—';
+  if (seconds < 60) return `${seconds}s`;
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
@@ -40,6 +45,18 @@ function portBadge(iface) {
   if (iface.admin !== 'up') return badge('Disabled');
   return iface.oper === 'up' ? badge('Up', 'good') : badge('Down', 'bad');
 }
+
+function bgpBadge(session) {
+  if (session.state === 'established') return badge('Established', 'good');
+  const name = session.state.charAt(0).toUpperCase() + session.state.slice(1);
+  return badge(session.admin === 'stop' ? 'Shut down' : name, session.admin === 'stop' ? '' : 'bad');
+}
+
+const EVENT = {
+  up: ['Reconnected', 'good'],
+  down: ['Disconnected', 'bad'],
+  flap: ['Dropped and recovered', 'warn'],
+};
 
 function percentMeter(value) {
   if (value === null || value === undefined) return h('span', { class: 'muted' }, '—');
@@ -102,7 +119,7 @@ export async function routers() {
     holder.replaceChildren(
       list.length
         ? table(
-            [{ label: 'Router' }, { label: 'Status' }, { label: 'Datacenter' }, { label: 'Uptime' }, { label: 'CPU' }, { label: 'Memory' }, { label: 'Ports up' }],
+            [{ label: 'Router' }, { label: 'Status' }, { label: 'Datacenter' }, { label: 'Uptime' }, { label: 'CPU' }, { label: 'Memory' }, { label: 'Ports up' }, { label: 'BGP up' }],
             list.map((r) =>
               h(
                 'tr',
@@ -114,6 +131,7 @@ export async function routers() {
                 h('td', null, percentMeter(r.cpu)),
                 h('td', null, percentMeter(r.memory)),
                 h('td', { class: 'nowrap' }, r.portsTotal ? `${r.portsUp} of ${r.portsTotal}` : '—'),
+                h('td', { class: 'nowrap' }, r.bgpTotal ? `${r.bgpUp} of ${r.bgpTotal}` : '—'),
               ),
             ),
           )
@@ -145,8 +163,8 @@ export async function routers() {
   return view;
 }
 
-function chartPanel(title, loadChart, action) {
-  const state = { range: '1h' };
+function chartPanel(title, loadChart) {
+  const state = { range: 'live' };
   const body = h('div', { class: 'panel-body' });
 
   async function render() {
@@ -162,38 +180,74 @@ function chartPanel(title, loadChart, action) {
         render();
       },
     },
-    RANGES.map(([value, label]) => h('option', { value }, label)),
+    LIVE_RANGES.map(([value, label]) => h('option', { value, selected: value === state.range }, label)),
   );
 
   render();
-  return { element: panel(title, body, h('div', { class: 'actions' }, action, picker)), render };
+  return { element: panel(title, body, picker), render, range: () => state.range };
 }
 
 export async function routerDetail({ id }, { reload }) {
   const [{ router }, datacenters] = await Promise.all([get(`/api/admin/routers/${id}`), datacenterOptions()]);
-  let selected = router.interfaces.find((iface) => iface.oper === 'up') ?? router.interfaces[0];
+  // Opens on the busiest interface, which is usually the one worth looking at.
+  const traffic0 = (iface) => (iface.inBps ?? 0) + (iface.outBps ?? 0);
+  let selected = [...router.interfaces].sort((a, b) => traffic0(b) - traffic0(a))[0];
+  let ports = router.interfaces;
+  let current = router;
+  let liveAt = 0;
+  let liveRows = [];
+  let liveFor = null;
+  let healthRows = null;
+
+  const isLive = () => Date.now() - liveAt < LIVE_MS * 2;
+  const liveLabel = () => h('span', { class: 'badge good' }, 'Live, every 6 seconds');
+
+  // Both Realtime graphs start from recent history, so they have a line straight away.
+  async function healthSeries() {
+    healthRows ??= (await get(`/api/admin/routers/${id}/history?range=5m`)).rows;
+    return healthRows;
+  }
+
+  async function liveSeries() {
+    if (liveFor !== selected.id) {
+      liveRows = (await get(`/api/admin/routers/${id}/interfaces/${selected.id}/history?range=5m`)).rows;
+      liveFor = selected.id;
+    }
+    return liveRows;
+  }
 
   const health = chartPanel('CPU and memory', async (range) => {
-    const { rows } = await get(`/api/admin/routers/${id}/history?range=${range}`);
-    return lineChart({
-      rows,
-      max: 100,
-      label: `CPU and memory use for ${router.name}`,
-      format: (value) => `${Math.round(value)}%`,
-      series: [
-        { key: 'cpu', label: 'CPU', className: 's1' },
-        { key: 'memory', label: 'Memory', className: 's2' },
-      ],
-    });
+    const rows = range === 'live' ? await healthSeries() : (await get(`/api/admin/routers/${id}/history?range=${range}`)).rows;
+    return h(
+      'div',
+      null,
+      range === 'live' ? h('div', { class: 'chart-title' }, liveLabel()) : '',
+      lineChart({
+        rows,
+        max: 100,
+        label: `CPU and memory use for ${router.name}`,
+        format: (value) => `${Math.round(value)}%`,
+        series: [
+          { key: 'cpu', label: 'CPU', className: 's1' },
+          { key: 'memory', label: 'Memory', className: 's2' },
+        ],
+      }),
+    );
   });
 
   const traffic = chartPanel('Bandwidth', async (range) => {
     if (!selected) return h('div', { class: 'empty' }, 'No interfaces yet.');
-    const { rows } = await get(`/api/admin/routers/${id}/interfaces/${selected.id}/history?range=${range}`);
+    const rows = range === 'live' ? await liveSeries() : (await get(`/api/admin/routers/${id}/interfaces/${selected.id}/history?range=${range}`)).rows;
     return h(
       'div',
       null,
-      h('div', { class: 'chart-title' }, h('b', { class: 'mono' }, selected.name), selected.alias ? ` ${selected.alias}` : ''),
+      h(
+        'div',
+        { class: 'chart-title' },
+        h('b', { class: 'mono' }, selected.name),
+        selected.alias ? ` ${selected.alias}` : '',
+        range === 'live' ? h('span', { class: 'live-pill' }, liveLabel()) : '',
+      ),
       lineChart({
         rows,
         label: `Bandwidth on ${selected.name}`,
@@ -212,7 +266,7 @@ export async function routerDetail({ id }, { reload }) {
     portRows.replaceChildren(
       list.length
         ? table(
-            [{ label: 'Interface' }, { label: 'Status' }, { label: 'Speed' }, { label: 'In' }, { label: 'Out' }, { label: 'Errors' }, { label: 'Drops' }],
+            [{ label: 'Interface' }, { label: 'Status' }, { label: 'Speed' }, { label: 'In' }, { label: 'Out' }, { label: 'Errors since boot' }, { label: 'Drops since boot' }],
             list.map((iface) =>
               h(
                 'tr',
@@ -227,7 +281,7 @@ export async function routerDetail({ id }, { reload }) {
                       type: 'button',
                       onClick: () => {
                         selected = iface;
-                        renderPorts(list);
+                        renderPorts(ports);
                         traffic.render();
                       },
                     },
@@ -247,7 +301,110 @@ export async function routerDetail({ id }, { reload }) {
         : emptyState('No interfaces yet', 'They appear after the first successful poll.'),
     );
   }
-  renderPorts(router.interfaces);
+  renderPorts(ports);
+
+  let sessions = router.bgp;
+  let selectedSession = null;
+  const bgpRows = h('div', null);
+  const bgpLog = h('div', null);
+
+  async function renderLog() {
+    const session = sessions.find((s) => s.id === selectedSession);
+    if (!session) {
+      bgpLog.replaceChildren();
+      return;
+    }
+    const { events } = await get(`/api/admin/routers/${id}/bgp/${session.id}/events`);
+    const rename = async () => {
+      const done = await formDialog({
+        title: `Name ${session.peerIp}`,
+        submitLabel: 'Save name',
+        fields: [{ name: 'label', label: 'Name', value: session.label, placeholder: 'Neptune-NYC (IPsec)' }],
+        onSubmit: (values) => patch(`/api/admin/routers/${id}/bgp/${session.id}`, values),
+      });
+      if (done) reload();
+    };
+    const fact = (label, value) => h('div', null, h('dt', null, label), h('dd', null, value));
+    bgpLog.replaceChildren(
+      h(
+        'div',
+        { class: 'bgp-detail' },
+        h(
+          'div',
+          { class: 'panel-head' },
+          h('h2', null, session.label || session.peerIp),
+          h('button', { class: 'btn sm', type: 'button', onClick: rename }, session.label ? 'Rename' : 'Add a name'),
+        ),
+        h(
+          'dl',
+          { class: 'facts' },
+          fact('Peer', session.peerIp),
+          fact('Local address', session.localIp || '—'),
+          fact('Remote AS', session.remoteAs || '—'),
+          fact('Messages in', session.inMessages.toLocaleString()),
+          fact('Messages out', session.outMessages.toLocaleString()),
+          fact('Last error', session.lastError || 'None'),
+        ),
+        h('h3', { class: 'section-title bgp-log-title' }, 'Disconnects and reconnects'),
+        events.length
+          ? table(
+              [{ label: 'When' }, { label: 'What happened' }, { label: 'State' }, { label: 'Reason' }],
+              events.map((event) =>
+                h(
+                  'tr',
+                  null,
+                  h('td', { class: 'nowrap' }, new Date(event.ts).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' })),
+                  h('td', { class: 'nowrap' }, badge(EVENT[event.type][0], EVENT[event.type][1])),
+                  h('td', { class: 'mono nowrap' }, `${event.fromState} → ${event.toState}`),
+                  h('td', { class: 'break' }, event.detail),
+                ),
+              ),
+            )
+          : emptyState('No changes recorded', 'This logs from when monitoring started. Anything earlier shows in the total above.'),
+      ),
+    );
+  }
+
+  function renderSessions() {
+    bgpRows.replaceChildren(
+      sessions.length
+        ? table(
+            [{ label: 'Peer' }, { label: 'Remote AS' }, { label: 'Status' }, { label: 'For' }, { label: 'Updates in' }, { label: 'Updates out' }, { label: 'Times established' }],
+            sessions.map((session) =>
+              h(
+                'tr',
+                { class: session.id === selectedSession ? 'selected' : '' },
+                h(
+                  'td',
+                  null,
+                  h(
+                    'button',
+                    {
+                      class: 'cell-link',
+                      type: 'button',
+                      onClick: () => {
+                        selectedSession = session.id === selectedSession ? null : session.id;
+                        renderSessions();
+                        renderLog();
+                      },
+                    },
+                    session.label || h('span', { class: 'mono' }, session.peerIp),
+                  ),
+                  session.label ? h('div', { class: 'muted mono' }, session.peerIp) : '',
+                ),
+                h('td', { class: 'nowrap' }, session.remoteAs ? `AS${session.remoteAs}` : '—'),
+                h('td', null, bgpBadge(session)),
+                h('td', { class: 'nowrap' }, formatUptime(session.stateSeconds)),
+                h('td', null, session.inUpdates.toLocaleString()),
+                h('td', null, session.outUpdates.toLocaleString()),
+                h('td', null, session.transitions.toLocaleString()),
+              ),
+            ),
+          )
+        : emptyState('No BGP data from this router', 'BGP over SNMP has to be turned on for the router first.'),
+    );
+  }
+  renderSessions();
 
   const facts = h('dl', { class: 'facts' });
   const title = h('div', { class: 'page-title' });
@@ -298,11 +455,16 @@ export async function routerDetail({ id }, { reload }) {
   };
   const refresh = async () => {
     const { router: fresh } = await get(`/api/admin/routers/${id}`);
-    renderHead(fresh);
-    selected = fresh.interfaces.find((iface) => iface.id === selected?.id) ?? selected;
-    renderPorts(fresh.interfaces);
-    health.render();
-    traffic.render();
+    // While live readings are arriving they are fresher than the 30-second poll, so they are left alone.
+    current = isLive() ? { ...fresh, cpu: current.cpu, memory: current.memory } : fresh;
+    renderHead(current);
+    if (!isLive()) {
+      ports = fresh.interfaces;
+      selected = ports.find((iface) => iface.id === selected?.id) ?? selected;
+      renderPorts(ports);
+    }
+    if (health.range() !== 'live') health.render();
+    if (traffic.range() !== 'live') traffic.render();
   };
   const pollNow = async (event) => {
     const button = event.currentTarget;
@@ -336,10 +498,51 @@ export async function routerDetail({ id }, { reload }) {
     problem,
     h('section', { class: 'panel' }, facts),
     traffic.element,
-    panel('Interfaces', portRows),
+    panel('Interfaces', portRows, liveLabel()),
     health.element,
+    panel('BGP sessions', h('div', null, bgpRows, bgpLog), liveLabel()),
   );
   whileShown(view, refresh);
+
+  const live = setInterval(async () => {
+    if (!document.contains(view)) {
+      clearInterval(live);
+      return;
+    }
+    if (document.hidden || document.querySelector('dialog[open]')) return;
+    let sample;
+    try {
+      sample = await get(`/api/admin/routers/${id}/live`);
+    } catch {
+      return; // A missed reading leaves a gap, and the next one carries on.
+    }
+    liveAt = Date.now();
+
+    const readings = new Map(sample.interfaces.map((reading) => [reading.id, reading]));
+    ports = ports.map((iface) => {
+      const reading = readings.get(iface.id);
+      if (!reading) return iface;
+      return { ...iface, oper: reading.oper, inBps: reading.in_bps ?? iface.inBps, outBps: reading.out_bps ?? iface.outBps };
+    });
+    selected = ports.find((iface) => iface.id === selected?.id) ?? selected;
+    renderPorts(ports);
+    sessions = sample.bgp;
+    renderSessions();
+    renderLog();
+    current = { ...current, cpu: sample.cpu ?? current.cpu, memory: sample.memory ?? current.memory };
+    renderHead(current);
+
+    if (healthRows && sample.ts > (healthRows.at(-1)?.ts ?? 0)) {
+      healthRows = [...healthRows, { ts: sample.ts, cpu: sample.cpu, memory: sample.memory }].slice(-LIVE_POINTS);
+      if (health.range() === 'live') health.render();
+    }
+    const reading = readings.get(selected?.id);
+    if (reading?.in_bps !== null && reading && liveFor === selected.id && sample.ts > (liveRows.at(-1)?.ts ?? 0)) {
+      liveRows = [...liveRows, { ts: sample.ts, in_bps: reading.in_bps, out_bps: reading.out_bps }].slice(-LIVE_POINTS);
+      if (traffic.range() === 'live') traffic.render();
+    }
+  }, LIVE_MS);
+
   return view;
 }
 

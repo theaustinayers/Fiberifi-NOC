@@ -8,6 +8,10 @@ const OID = {
   hrSystemUptime: '1.3.6.1.2.1.25.1.1.0',
   hrProcessorLoad: '1.3.6.1.2.1.25.3.3.1.2',
   ssCpuIdle: '1.3.6.1.4.1.2021.11.11.0',
+  ssCpuRawUser: '1.3.6.1.4.1.2021.11.50.0',
+  ssCpuRawNice: '1.3.6.1.4.1.2021.11.51.0',
+  ssCpuRawSystem: '1.3.6.1.4.1.2021.11.52.0',
+  ssCpuRawIdle: '1.3.6.1.4.1.2021.11.53.0',
   memTotalReal: '1.3.6.1.4.1.2021.4.5.0',
   memAvailReal: '1.3.6.1.4.1.2021.4.6.0',
   memBuffer: '1.3.6.1.4.1.2021.4.14.0',
@@ -25,6 +29,14 @@ const OID = {
   ifHighSpeed: '1.3.6.1.2.1.31.1.1.1.15',
   ifAlias: '1.3.6.1.2.1.31.1.1.1.18',
 };
+
+// Internal to the router, and never carry traffic worth watching.
+const HIDDEN_INTERFACES = new Set(['lo', 'pimreg', 'pim6reg']);
+
+const BGP_PEER_TABLE = '1.3.6.1.2.1.15.3.1';
+const BGP_COLUMN = { state: 2, admin: 3, localIp: 5, peerIp: 7, remoteAs: 9, inUpdates: 10, outUpdates: 11, inMessages: 12, outMessages: 13, lastError: 14, transitions: 15, stateSeconds: 16 };
+const BGP_STATE = { 1: 'idle', 2: 'connect', 3: 'active', 4: 'opensent', 5: 'openconfirm', 6: 'established' };
+const BGP_ERROR = { 1: 'Message header error', 2: 'OPEN message error', 3: 'UPDATE message error', 4: 'Hold timer expired', 5: 'Finite state machine error', 6: 'Cease' };
 
 const IF_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 4: 'unknown', 5: 'dormant', 6: 'notPresent', 7: 'lowerLayerDown' };
 
@@ -83,11 +95,80 @@ function walk(session, base) {
   });
 }
 
+function bgpError(value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.alloc(0);
+  if (bytes.length < 2 || !bytes[0]) return '';
+  return `${BGP_ERROR[bytes[0]] ?? `Error ${bytes[0]}`} (${bytes[0]}/${bytes[1]})`;
+}
+
+// The whole peer table in one walk. Routers without FRR's SNMP module simply return nothing.
+async function readBgp(session) {
+  const cells = await walk(session, BGP_PEER_TABLE);
+  const peers = new Map();
+  for (const [key, value] of cells) {
+    const dot = key.indexOf('.');
+    const column = Number(key.slice(0, dot));
+    const peer = key.slice(dot + 1);
+    if (!peers.has(peer)) peers.set(peer, new Map());
+    peers.get(peer).set(column, value);
+  }
+  return [...peers.entries()].map(([peerIp, cols]) => ({
+    peerIp,
+    localIp: text(cols.get(BGP_COLUMN.localIp)),
+    remoteAs: Number(cols.get(BGP_COLUMN.remoteAs) ?? 0),
+    state: BGP_STATE[cols.get(BGP_COLUMN.state)] ?? 'unknown',
+    admin: cols.get(BGP_COLUMN.admin) === 2 ? 'start' : 'stop',
+    inUpdates: Number(cols.get(BGP_COLUMN.inUpdates) ?? 0),
+    outUpdates: Number(cols.get(BGP_COLUMN.outUpdates) ?? 0),
+    inMessages: Number(cols.get(BGP_COLUMN.inMessages) ?? 0),
+    outMessages: Number(cols.get(BGP_COLUMN.outMessages) ?? 0),
+    transitions: Number(cols.get(BGP_COLUMN.transitions) ?? 0),
+    stateSeconds: Number(cols.get(BGP_COLUMN.stateSeconds) ?? 0),
+    lastError: bgpError(cols.get(BGP_COLUMN.lastError)),
+  }));
+}
+
 function memoryPercent(values) {
   const total = Number(values[OID.memTotalReal] ?? 0);
   if (!total) return null;
   const free = Number(values[OID.memAvailReal] ?? 0) + Number(values[OID.memBuffer] ?? 0) + Number(values[OID.memCached] ?? 0);
   return Math.max(0, Math.min(100, ((total - free) / total) * 100));
+}
+
+// Everything a live page needs, in one short read. CPU comes back as raw ticks because the usual
+// CPU figures are one-minute averages, which would look frozen at this speed.
+export async function readLive(host, credentials, { port = 161 } = {}) {
+  const session = open(host, credentials, port);
+  try {
+    const values = await getScalars(session, [
+      OID.memTotalReal,
+      OID.memAvailReal,
+      OID.memBuffer,
+      OID.memCached,
+      OID.ssCpuRawUser,
+      OID.ssCpuRawNice,
+      OID.ssCpuRawSystem,
+      OID.ssCpuRawIdle,
+    ]);
+    const inOctets = await walk(session, OID.ifHCInOctets);
+    const outOctets = await walk(session, OID.ifHCOutOctets);
+    const oper = await walk(session, OID.ifOperStatus);
+    const idle = values[OID.ssCpuRawIdle];
+    const busy = [OID.ssCpuRawUser, OID.ssCpuRawNice, OID.ssCpuRawSystem].map((oid) => values[oid]);
+    return {
+      cpuTicks: idle === undefined || busy.includes(undefined) ? null : { idle: Number(idle), total: Number(idle) + busy.reduce((sum, ticks) => sum + Number(ticks), 0) },
+      memory: memoryPercent(values),
+      bgp: await readBgp(session),
+      interfaces: [...inOctets.keys()].map((index) => ({
+        index: Number(index),
+        oper: IF_STATUS[oper.get(index)] ?? 'unknown',
+        inOctets: toBigInt(inOctets.get(index)),
+        outOctets: toBigInt(outOctets.get(index)),
+      })),
+    };
+  } finally {
+    session.close();
+  }
 }
 
 // Per-core load is the better reading, but not every agent reports it, so idle time is the fallback.
@@ -121,7 +202,8 @@ export async function readRouter(host, credentials, { port = 161 } = {}) {
       .map(([index, name]) => ({
         index: Number(index),
         name: text(name),
-        alias: text(columns.ifAlias.get(index)),
+        // VyOS repeats the interface name here when no description is set.
+        alias: text(columns.ifAlias.get(index)) === text(name) ? '' : text(columns.ifAlias.get(index)),
         speedMbps: Number(columns.ifHighSpeed.get(index) ?? 0),
         admin: IF_STATUS[columns.ifAdminStatus.get(index)] ?? 'unknown',
         oper: IF_STATUS[columns.ifOperStatus.get(index)] ?? 'unknown',
@@ -132,7 +214,7 @@ export async function readRouter(host, credentials, { port = 161 } = {}) {
         inDiscards: Number(columns.ifInDiscards.get(index) ?? 0),
         outDiscards: Number(columns.ifOutDiscards.get(index) ?? 0),
       }))
-      .filter((iface) => iface.name && iface.name !== 'lo');
+      .filter((iface) => iface.name && !HIDDEN_INTERFACES.has(iface.name));
 
     const uptime = values[OID.hrSystemUptime];
     return {
@@ -143,6 +225,7 @@ export async function readRouter(host, credentials, { port = 161 } = {}) {
       memory: memoryPercent(values),
       load1: values[OID.load1] === undefined ? null : Number(text(values[OID.load1])),
       interfaces,
+      bgp: await readBgp(session),
     };
   } finally {
     session.close();

@@ -226,6 +226,42 @@ const MIGRATIONS = [
       ) WITHOUT ROWID;
     `);
   },
+
+  // 5: BGP sessions, and a log of every time one went down or came back.
+  (db) => {
+    db.exec(`
+      CREATE TABLE bgp_sessions (
+        id INTEGER PRIMARY KEY,
+        router_id INTEGER NOT NULL REFERENCES routers (id) ON DELETE CASCADE,
+        peer_ip TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT '',
+        local_ip TEXT NOT NULL DEFAULT '',
+        remote_as INTEGER,
+        state TEXT NOT NULL DEFAULT 'unknown',
+        admin TEXT NOT NULL DEFAULT 'unknown',
+        in_updates INTEGER NOT NULL DEFAULT 0,
+        out_updates INTEGER NOT NULL DEFAULT 0,
+        in_messages INTEGER NOT NULL DEFAULT 0,
+        out_messages INTEGER NOT NULL DEFAULT 0,
+        transitions INTEGER NOT NULL DEFAULT 0,
+        state_seconds INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
+        seen_at INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (router_id, peer_ip)
+      );
+
+      CREATE TABLE bgp_events (
+        id INTEGER PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES bgp_sessions (id) ON DELETE CASCADE,
+        ts INTEGER NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('up', 'down', 'flap')),
+        from_state TEXT NOT NULL DEFAULT '',
+        to_state TEXT NOT NULL DEFAULT '',
+        detail TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX bgp_events_session ON bgp_events (session_id, ts);
+    `);
+  },
 ];
 
 export function migrate(db) {

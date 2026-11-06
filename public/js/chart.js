@@ -23,6 +23,8 @@ function niceMax(value) {
 function timeLabel(ts, span) {
   const date = new Date(ts * 1000);
   if (span > 172800) return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  // Over a few minutes the labels would all round to the same minute.
+  if (span <= 900) return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
   return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
@@ -86,7 +88,7 @@ export function lineChart({ rows, series, format, max, label }) {
     cross.setAttribute('x2', x(row.ts));
     cross.setAttribute('visibility', 'visible');
     tip.replaceChildren(
-      h('b', null, new Date(row.ts * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })),
+      h('b', null, new Date(row.ts * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: t1 - t0 <= 900 ? 'medium' : 'short' })),
       ...series.map((s) => h('div', null, h('i', { class: `swatch ${s.className}` }), `${s.label}: ${row[s.key] === null || row[s.key] === undefined ? '—' : format(row[s.key])}`)),
     );
     tip.hidden = false;

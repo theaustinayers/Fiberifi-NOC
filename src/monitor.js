@@ -1,16 +1,24 @@
 // Polls routers on a timer, works out bandwidth from the counters, and keeps history.
 import { getSetting, setSetting, transaction } from './db.js';
-import { readRouter } from './lib/snmp.js';
+import { readLive, readRouter } from './lib/snmp.js';
 import { decryptSecret, encryptSecret } from './lib/security.js';
 import { ApiError, invalid, oneOf, requiredText, text } from './validate.js';
 
 const RAW_DAYS = 2;
+const BGP_EVENT_DAYS = 90;
 const ROLLUP_DAYS = 35;
 const ROLLUP_SECONDS = 300;
 const DOWN_AFTER_FAILURES = 2;
 const MAX_POINTS = 360;
 
-export const RANGES = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 };
+export const RANGES = { '5m': 300, '15m': 900, '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 };
+
+// snmpd refreshes interface counters every 3 seconds, so pages read every 6 to land at the same point in
+// that cycle. Reading every 5 was measured at up to 45% off on steady traffic. This also stops several
+// open pages adding load.
+const LIVE_MIN_MS = 5000;
+// An interface missing for this long has been removed from the router.
+const GONE_AFTER_MS = 3600 * 1000;
 
 // The largest gap two samples can have before the rate between them stops meaning anything.
 const MAX_GAP_SECONDS = 600;
@@ -25,7 +33,10 @@ export function rate(previous, current, seconds) {
 
 export function createMonitor(db, config) {
   const reader = config.snmpReader ?? ((host, credentials) => readRouter(host, credentials, { port: config.snmpPort }));
+  const liveReader = config.snmpLiveReader ?? ((host, credentials) => readLive(host, credentials, { port: config.snmpPort }));
   const intervalMs = (config.snmpIntervalSeconds ?? 30) * 1000;
+  const liveReadings = new Map();
+  const liveRequests = new Map();
   let timer = null;
   let polling = false;
 
@@ -113,6 +124,32 @@ export function createMonitor(db, config) {
     return router;
   }
 
+  // Logs a change the moment it is seen. Live pages feed this every 5 seconds, the background poll every 30.
+  function storeBgp(router, peers, now) {
+    if (!peers) return;
+    const upsert = db.prepare(
+      `INSERT INTO bgp_sessions (router_id, peer_ip, local_ip, remote_as, state, admin, in_updates, out_updates, in_messages,
+         out_messages, transitions, state_seconds, last_error, seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (router_id, peer_ip) DO UPDATE SET local_ip = excluded.local_ip, remote_as = excluded.remote_as,
+         state = excluded.state, admin = excluded.admin, in_updates = excluded.in_updates, out_updates = excluded.out_updates,
+         in_messages = excluded.in_messages, out_messages = excluded.out_messages, transitions = excluded.transitions,
+         state_seconds = excluded.state_seconds, last_error = excluded.last_error, seen_at = excluded.seen_at`,
+    );
+    const addEvent = db.prepare('INSERT INTO bgp_events (session_id, ts, type, from_state, to_state, detail) VALUES (?, ?, ?, ?, ?, ?)');
+    for (const peer of peers) {
+      const previous = db.prepare('SELECT * FROM bgp_sessions WHERE router_id = ? AND peer_ip = ?').get(router.id, peer.peerIp);
+      upsert.run(router.id, peer.peerIp, peer.localIp, peer.remoteAs, peer.state, peer.admin, peer.inUpdates, peer.outUpdates, peer.inMessages, peer.outMessages, peer.transitions, peer.stateSeconds, peer.lastError, now);
+      if (!previous) continue;
+      const wasUp = previous.state === 'established';
+      const isUp = peer.state === 'established';
+      if (wasUp && !isUp) addEvent.run(previous.id, now, 'down', previous.state, peer.state, peer.lastError);
+      else if (!wasUp && isUp) addEvent.run(previous.id, now, 'up', previous.state, peer.state, '');
+      // Back up already, with the counter moved on: it dropped and recovered between two readings.
+      else if (wasUp && isUp && peer.transitions > previous.transitions) addEvent.run(previous.id, now, 'flap', previous.state, peer.state, peer.lastError);
+    }
+  }
+
   function store(router, data, now) {
     const seconds = Math.floor(now / 1000);
     transaction(db, () => {
@@ -127,6 +164,7 @@ export function createMonitor(db, config) {
         data.memory,
       );
 
+      storeBgp(router, data.bgp, now);
       const existing = new Map(db.prepare('SELECT * FROM router_interfaces WHERE router_id = ?').all(router.id).map((row) => [row.name, row]));
       const upsert = db.prepare(
         `INSERT INTO router_interfaces (router_id, name, if_index, alias, speed_mbps, admin, oper, in_octets, out_octets,
@@ -215,6 +253,7 @@ export function createMonitor(db, config) {
       db.prepare('DELETE FROM router_samples WHERE ts < ?').run(rawCutoff);
       db.prepare('DELETE FROM interface_rollups WHERE ts < ?').run(rollupCutoff);
       db.prepare('DELETE FROM router_rollups WHERE ts < ?').run(rollupCutoff);
+      db.prepare('DELETE FROM bgp_events WHERE ts < ?').run(now - BGP_EVENT_DAYS * 86400 * 1000);
     });
   }
 
@@ -246,9 +285,69 @@ export function createMonitor(db, config) {
     return { range, step, rows };
   }
 
-  function interfaceHistory(routerId, interfaceId, range) {
+  function requireInterface(routerId, interfaceId) {
     const iface = db.prepare('SELECT * FROM router_interfaces WHERE id = ? AND router_id = ?').get(Number(interfaceId), Number(routerId));
     if (!iface) throw new ApiError(404, 'not_found', 'That interface does not exist');
+    return iface;
+  }
+
+  async function takeLiveReading(router, last, now) {
+    const creds = credentials();
+    if (!creds) throw new ApiError(409, 'snmp_not_configured', 'Add the SNMP username and password first');
+    let data;
+    try {
+      data = await liveReader(router.host, creds);
+    } catch (error) {
+      throw new ApiError(502, 'snmp_error', `Could not read ${router.name}: ${error.message}`);
+    }
+
+    const rows = new Map(db.prepare('SELECT * FROM router_interfaces WHERE router_id = ?').all(router.id).map((row) => [row.if_index, row]));
+    const counters = new Map();
+    const interfaces = [];
+    for (const reading of data.interfaces) {
+      const row = rows.get(reading.index);
+      if (!row) continue;
+      // With no live readings yet it measures from the last poll, so the first sample already has a rate.
+      const previous = last?.counters.get(row.id);
+      const from = previous ? { ...previous, at: last.at } : { at: row.counters_at, inOctets: BigInt(row.in_octets), outOctets: BigInt(row.out_octets) };
+      const seconds = (now - from.at) / 1000;
+      counters.set(row.id, { inOctets: reading.inOctets, outOctets: reading.outOctets });
+      interfaces.push({
+        id: row.id,
+        oper: reading.oper,
+        in_bps: rate(from.inOctets, reading.inOctets, seconds),
+        out_bps: rate(from.outOctets, reading.outOctets, seconds),
+      });
+    }
+
+    // Busy share of the ticks since the last reading. Until there is one, the last polled figure stands in.
+    let cpu = router.cpu;
+    if (data.cpuTicks && last?.cpuTicks) {
+      const total = data.cpuTicks.total - last.cpuTicks.total;
+      const idle = data.cpuTicks.idle - last.cpuTicks.idle;
+      if (total > 0) cpu = Math.max(0, Math.min(100, (1 - idle / total) * 100));
+      else cpu = last.sample.cpu;
+    }
+
+    transaction(db, () => storeBgp(router, data.bgp, now));
+    const sample = { ts: Math.floor(now / 1000), cpu, memory: data.memory, interfaces, bgp: bgpSessions(router) };
+    liveReadings.set(router.id, { at: now, counters, cpuTicks: data.cpuTicks, sample });
+    return sample;
+  }
+
+  // One reading per router every few seconds, shared by everyone watching it.
+  async function liveSample(routerId, now = Date.now()) {
+    const router = requireRouter(routerId);
+    const last = liveReadings.get(router.id);
+    if (last && now - last.at < LIVE_MIN_MS) return last.sample;
+    if (liveRequests.has(router.id)) return liveRequests.get(router.id);
+    const request = takeLiveReading(router, last, now).finally(() => liveRequests.delete(router.id));
+    liveRequests.set(router.id, request);
+    return request;
+  }
+
+  function interfaceHistory(routerId, interfaceId, range) {
+    const iface = requireInterface(routerId, interfaceId);
     return series(iface.id, 'interface_id', ['in_bps', 'out_bps'], range, 'interface_samples', 'interface_rollups');
   }
 
@@ -257,10 +356,55 @@ export function createMonitor(db, config) {
     return series(router.id, 'router_id', ['cpu', 'memory'], range, 'router_samples', 'router_rollups');
   }
 
+  // A session gone from the table has been removed from the router's config.
+  function bgpSessions(router) {
+    return db
+      .prepare(`SELECT * FROM bgp_sessions WHERE router_id = ? AND seen_at >= ? ORDER BY (state = 'established'), COALESCE(NULLIF(label, ''), peer_ip)`)
+      .all(router.id, (router.last_seen ?? 0) - GONE_AFTER_MS)
+      .map((row) => ({
+        id: row.id,
+        peerIp: row.peer_ip,
+        localIp: row.local_ip,
+        label: row.label,
+        remoteAs: row.remote_as,
+        state: row.state,
+        admin: row.admin,
+        inUpdates: row.in_updates,
+        outUpdates: row.out_updates,
+        inMessages: row.in_messages,
+        outMessages: row.out_messages,
+        transitions: row.transitions,
+        stateSeconds: row.state_seconds,
+        lastError: row.last_error,
+      }));
+  }
+
+  function requireSession(routerId, sessionId) {
+    const session = db.prepare('SELECT * FROM bgp_sessions WHERE id = ? AND router_id = ?').get(Number(sessionId), Number(routerId));
+    if (!session) throw new ApiError(404, 'not_found', 'That BGP session does not exist');
+    return session;
+  }
+
+  function bgpEvents(routerId, sessionId) {
+    const session = requireSession(routerId, sessionId);
+    return db
+      .prepare('SELECT id, ts, type, from_state AS fromState, to_state AS toState, detail FROM bgp_events WHERE session_id = ? ORDER BY ts DESC, id DESC LIMIT 200')
+      .all(session.id);
+  }
+
+  function labelSession(routerId, sessionId, input) {
+    const session = requireSession(routerId, sessionId);
+    db.prepare('UPDATE bgp_sessions SET label = ? WHERE id = ?').run(text(input.label, { max: 80, field: 'label', label: 'Name' }), session.id);
+    return session;
+  }
+
   function summary(router) {
     const ports = db
-      .prepare(`SELECT COUNT(*) AS total, SUM(oper = 'up') AS up FROM router_interfaces WHERE router_id = ? AND admin = 'up'`)
-      .get(router.id);
+      .prepare(`SELECT COUNT(*) AS total, SUM(oper = 'up') AS up FROM router_interfaces WHERE router_id = ? AND admin = 'up' AND counters_at >= ?`)
+      .get(router.id, (router.last_seen ?? 0) - GONE_AFTER_MS);
+    const bgp = db
+      .prepare(`SELECT COUNT(*) AS total, SUM(state = 'established') AS up FROM bgp_sessions WHERE router_id = ? AND seen_at >= ?`)
+      .get(router.id, (router.last_seen ?? 0) - GONE_AFTER_MS);
     const datacenter = router.datacenter_id ? db.prepare('SELECT id, name, code FROM datacenters WHERE id = ?').get(router.datacenter_id) : null;
     return {
       id: router.id,
@@ -281,6 +425,8 @@ export function createMonitor(db, config) {
       polledAt: router.polled_at,
       portsUp: ports.up ?? 0,
       portsTotal: ports.total,
+      bgpUp: bgp.up ?? 0,
+      bgpTotal: bgp.total,
     };
   }
 
@@ -291,8 +437,8 @@ export function createMonitor(db, config) {
   function routerDetail(id) {
     const router = requireRouter(id);
     const interfaces = db
-      .prepare('SELECT * FROM router_interfaces WHERE router_id = ? ORDER BY (oper = \'up\') DESC, name')
-      .all(router.id)
+      .prepare('SELECT * FROM router_interfaces WHERE router_id = ? AND counters_at >= ? ORDER BY (oper = \'up\') DESC, name')
+      .all(router.id, (router.last_seen ?? 0) - GONE_AFTER_MS)
       .map((row) => ({
         id: row.id,
         name: row.name,
@@ -305,7 +451,7 @@ export function createMonitor(db, config) {
         errors: row.in_errors + row.out_errors,
         discards: row.in_discards + row.out_discards,
       }));
-    return { ...summary(router), interfaces };
+    return { ...summary(router), interfaces, bgp: bgpSessions(router) };
   }
 
   return {
@@ -327,6 +473,9 @@ export function createMonitor(db, config) {
     listRouters,
     routerDetail,
     interfaceHistory,
+    liveSample,
+    bgpEvents,
+    labelSession,
     routerHistory,
   };
 }

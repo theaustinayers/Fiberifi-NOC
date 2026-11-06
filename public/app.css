@@ -115,6 +115,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 16px; min-width: 0; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .panel-body { padding: 14px; }
+.panel-head h2 { white-space: nowrap; }
+.panel-head select { width: auto; }
 .grid-2 { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; align-items: start; }
 .grid-2 > .panel { margin-bottom: 0; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
@@ -242,6 +244,9 @@ tbody tr.explore-head:hover td { background: var(--bg); }
 .chart-tip b { display: block; margin-bottom: 2px; font-weight: 600; }
 .chart-title { margin-bottom: 8px; color: var(--ink-3); }
 .chart-title b { color: var(--ink); }
+.live-pill { margin-left: 8px; }
+.bgp-detail { border-top: 1px solid var(--line); }
+.bgp-log-title { margin: 0; padding: 12px 14px; border-top: 1px solid var(--line); }
 tr.selected td { background: rgb(94 170 253 / 0.08); }
 tbody tr.selected:hover td { background: rgb(94 170 253 / 0.08); }
 .meter { display: flex; align-items: center; gap: 8px; min-width: 128px; }

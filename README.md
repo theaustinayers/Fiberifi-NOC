@@ -31,7 +31,7 @@
 |---|---|
 | 🔎 **Drill all the way down** | Open a `/22` into `/24`s, then smaller blocks, then single addresses. Blocks don't need to exist first, and assignments update live. |
 | 🧩 **Nest prefixes freely** | Keep a whole range as your own and place customers inside it. The smallest assignment wins, and an address can never belong to two customers. |
-| 📡 **Live router monitoring** | CPU, memory, uptime, and bandwidth on every port and tunnel over encrypted SNMPv3, with history graphs. |
+| 📡 **Live router monitoring** | CPU, memory, bandwidth on every port and tunnel, and BGP sessions with a disconnect log, over encrypted SNMPv3. |
 | 🌐 **Self-service reverse DNS** | Customers publish their own PTR records, straight to Cloudflare, only for addresses they own. |
 | 👥 **Customer teams** | Each customer can add their own Admin and Read only logins. |
 | 🔒 **Safe by default** | Gateway and broadcast addresses are worked out for every prefix and protected on the server, not just greyed out in the browser. |
@@ -180,7 +180,8 @@ The token is encrypted in the database and never sent back to the browser.
 - **Unassigning a subnet** removes the customer's access first, then deletes their address records and PTRs so the next customer inherits nothing. If Cloudflare is unreachable, the access is still removed and the admin is told which PTRs are left over. They can be cleared from the prefix's Addresses tab.
 - **Default ranges** are seeded once. A deleted range stays deleted.
 - **Team members.** A customer's owner login and any team member with Admin access can add logins to the account from the Team page. Admin members can edit records and rDNS and manage the team. Read-only members can view and export. Disabling or deleting a customer also cuts off its team.
-- **Routers.** Polled over SNMPv3 from the NOC server every 30 seconds, for admins only. A router shows as Down after two failed polls. Detailed history is kept for 2 days and five-minute averages for 35 days. For a router behind a tunnel, use its tunnel IP as the SNMP address.
+- **Routers.** Polled over SNMPv3 from the NOC server every 30 seconds, for admins only. A router's page goes live while it's open: its interfaces, BGP sessions, CPU and memory update every 6 seconds. A router shows as Down after two failed polls. Detailed history is kept for 2 days and five-minute averages for 35 days. For a router behind a tunnel, use its tunnel IP as the SNMP address.
+- **BGP sessions.** Read from the router's BGP4 MIB, which covers IPv4 peers. Click a session for its stats and a log of disconnects and reconnects, kept for 90 days. The log starts when monitoring starts. A session that drops and recovers between two readings shows as Dropped and recovered.
 - **Datacenters.** Managed under Datacenters in the menu. Allocating a subnet requires one, and VLAN is optional. A datacenter cannot be deleted while prefixes use it.
 
 ## Operations

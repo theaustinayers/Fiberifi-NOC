@@ -43,6 +43,16 @@ export function routerRoutes({ monitor, audit }) {
 
   router.get('/:id/history', (req, res) => res.json(monitor.routerHistory(req.params.id, req.query.range)));
 
+  router.get('/:id/bgp/:sessionId/events', (req, res) => res.json({ events: monitor.bgpEvents(req.params.id, req.params.sessionId) }));
+
+  router.patch('/:id/bgp/:sessionId', (req, res) => {
+    const session = monitor.labelSession(req.params.id, req.params.sessionId, req.body ?? {});
+    audit(req, 'bgp.label', session.peer_ip);
+    res.json({ ok: true });
+  });
+
+  router.get('/:id/live', async (req, res) => res.json(await monitor.liveSample(req.params.id)));
+
   router.get('/:id/interfaces/:interfaceId/history', (req, res) => {
     res.json(monitor.interfaceHistory(req.params.id, req.params.interfaceId, req.query.range));
   });

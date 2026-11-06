@@ -189,6 +189,198 @@ describe('monitor', () => {
     assert.ok(rows.every((r, i) => i === 0 || r.ts > rows[i - 1].ts));
   });
 
+  describe('realtime', () => {
+    let reads;
+    let live;
+    let liveDb;
+    let router;
+    let iface;
+    const start = Date.now();
+    const reading = (inOctets, outOctets, ticks = null, memory = 40, oper = 'up') => ({ cpuTicks: ticks, memory, interfaces: [{ index: 1, oper, inOctets, outOctets }] });
+    const eth1 = (sample) => sample.interfaces.find((i) => i.id === iface.id);
+
+    before(async () => {
+      liveDb = openDatabase(':memory:');
+      reads = [];
+      live = createMonitor(liveDb, {
+        appSecret: SECRET,
+        snmpReader: async () => fakeRouter(),
+        snmpLiveReader: async () => {
+          const next = reads.shift();
+          if (next instanceof Error) throw next;
+          return next;
+        },
+      });
+      live.saveSettings({ user: 'noc', authPassword: PASSWORD });
+      router = live.createRouter({ name: 'R', host: '192.0.2.1' });
+      await live.pollRouter(router, start);
+      iface = live.routerDetail(router.id).interfaces.find((i) => i.name === 'eth1');
+    });
+    after(() => liveDb.close());
+
+    test('the first reading already has a rate, measured from the last poll', async () => {
+      reads.push(reading(1000n + 625_000n, 2000n + 62_500n, { idle: 1000, total: 2000 }));
+      const sample = await live.liveSample(router.id, start + 5000);
+      assert.equal(eth1(sample).in_bps, 1_000_000);
+      assert.equal(eth1(sample).out_bps, 100_000);
+      assert.equal(sample.memory, 40);
+    });
+
+    test('CPU falls back to the polled figure until it has two readings', async () => {
+      assert.equal((await live.liveSample(router.id, start + 6000)).cpu, 12);
+    });
+
+    test('readings inside the minimum gap are shared, not repeated', () => {
+      assert.equal(reads.length, 0, 'the router was not asked again');
+    });
+
+    test('the next reading measures from the last live one, and CPU from the tick change', async () => {
+      reads.push(reading(1000n + 625_000n + 1_250_000n, 2000n + 62_500n, { idle: 1075, total: 2100 }, 41, 'down'));
+      const sample = await live.liveSample(router.id, start + 10000);
+      assert.equal(eth1(sample).in_bps, 2_000_000);
+      assert.equal(eth1(sample).out_bps, 0);
+      assert.equal(eth1(sample).oper, 'down');
+      assert.equal(sample.cpu, 25);
+      assert.equal(sample.memory, 41);
+    });
+
+    test('a pause with no ticks keeps the last CPU figure instead of dividing by zero', async () => {
+      reads.push(reading(2_000_000n, 100_000n, { idle: 1075, total: 2100 }));
+      assert.equal((await live.liveSample(router.id, start + 15000)).cpu, 25);
+    });
+
+    test('two people watching at once make one request', async () => {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let calls = 0;
+      const shared = createMonitor(liveDb, {
+        appSecret: SECRET,
+        snmpLiveReader: async () => {
+          calls += 1;
+          await gate;
+          return reading(5000n, 5000n);
+        },
+      });
+      const first = shared.liveSample(router.id);
+      const second = shared.liveSample(router.id);
+      release();
+      assert.deepEqual(await first, await second);
+      assert.equal(calls, 1);
+    });
+
+    test('a failed reading says so, and does not change the router status', async () => {
+      reads.push(new Error('Request timed out'));
+      await assert.rejects(live.liveSample(router.id, start + 25000), { code: 'snmp_error' });
+      assert.equal(live.routerDetail(router.id).status, 'up');
+    });
+
+    test('a router that does not exist is refused', async () => {
+      await assert.rejects(live.liveSample(99999), { code: 'not_found' });
+    });
+
+    test('an interface removed from the router drops off the page, and short ranges work', () => {
+      const gone = liveDb.prepare(`UPDATE router_interfaces SET counters_at = 1 WHERE name = 'eth2'`).run();
+      assert.equal(gone.changes, 1);
+      const detail = live.routerDetail(router.id);
+      assert.ok(!detail.interfaces.some((i) => i.name === 'eth2'));
+      assert.equal(detail.portsTotal, 1);
+      assert.equal(live.interfaceHistory(router.id, iface.id, '5m').step, 30);
+      assert.equal(live.interfaceHistory(router.id, iface.id, '15m').step, 30);
+    });
+  });
+
+  describe('BGP', () => {
+    let bgpDb;
+    let mon;
+    let router;
+    let peers;
+    let clock = 1_000_000_000_000;
+    const peer = (overrides = {}) => ({ peerIp: '198.51.100.1', localIp: '198.51.100.2', remoteAs: 64500, state: 'established', admin: 'start', inUpdates: 10, outUpdates: 5, inMessages: 100, outMessages: 90, transitions: 1, stateSeconds: 3600, lastError: '', ...overrides });
+    const poll = async (...list) => {
+      peers = list;
+      clock += 30000;
+      await mon.pollRouter(bgpDb.prepare('SELECT * FROM routers').get(), clock);
+    };
+    const session = () => mon.routerDetail(router.id).bgp[0];
+    const events = () => mon.bgpEvents(router.id, session().id);
+
+    before(() => {
+      bgpDb = openDatabase(':memory:');
+      mon = createMonitor(bgpDb, { appSecret: SECRET, snmpReader: async () => fakeRouter({ bgp: peers }) });
+      mon.saveSettings({ user: 'noc', authPassword: PASSWORD });
+      router = mon.createRouter({ name: 'B', host: '192.0.2.1' });
+    });
+    after(() => bgpDb.close());
+
+    test('a session already up when monitoring starts is not logged as a reconnect', async () => {
+      await poll(peer());
+      assert.equal(session().state, 'established');
+      assert.equal(session().remoteAs, 64500);
+      assert.equal(events().length, 0);
+      assert.equal(mon.listRouters()[0].bgpUp, 1);
+    });
+
+    test('a session going down is logged with its reason', async () => {
+      await poll(peer({ state: 'active', transitions: 1, lastError: 'Hold timer expired (4/0)' }));
+      const [event] = events();
+      assert.equal(event.type, 'down');
+      assert.equal(event.fromState, 'established');
+      assert.equal(event.toState, 'active');
+      assert.equal(event.detail, 'Hold timer expired (4/0)');
+      assert.equal(mon.listRouters()[0].bgpUp, 0);
+    });
+
+    test('moving between down states is not a new event', async () => {
+      await poll(peer({ state: 'connect', transitions: 1 }));
+      assert.equal(events().length, 1);
+    });
+
+    test('coming back is logged as a reconnect, newest first', async () => {
+      await poll(peer({ transitions: 2 }));
+      assert.deepEqual(events().map((e) => e.type), ['up', 'down']);
+    });
+
+    test('a drop that recovers between readings is still caught', async () => {
+      await poll(peer({ transitions: 3, lastError: 'Cease (6/4)' }));
+      assert.equal(events()[0].type, 'flap');
+      assert.equal(events()[0].detail, 'Cease (6/4)');
+    });
+
+    test('nothing changing logs nothing', async () => {
+      const before = events().length;
+      await poll(peer({ transitions: 3, inUpdates: 999 }));
+      assert.equal(events().length, before);
+      assert.equal(session().inUpdates, 999);
+    });
+
+    test('live readings log changes too, without waiting for the next poll', async () => {
+      const live = createMonitor(bgpDb, { appSecret: SECRET, snmpLiveReader: async () => ({ cpuTicks: null, memory: 40, interfaces: [], bgp: [peer({ state: 'idle', transitions: 3 })] }) });
+      const sample = await live.liveSample(router.id, clock + 5000);
+      assert.equal(sample.bgp[0].state, 'idle');
+      assert.equal(events()[0].type, 'down');
+    });
+
+    test('a name survives polling, and belongs to its own router', async () => {
+      mon.labelSession(router.id, session().id, { label: 'Neptune-NYC' });
+      await poll(peer({ transitions: 4 }));
+      assert.equal(session().label, 'Neptune-NYC');
+      const other = mon.createRouter({ name: 'B2', host: '192.0.2.2' });
+      assert.throws(() => mon.bgpEvents(other.id, session().id), { code: 'not_found' });
+    });
+
+    test('a router with no BGP data just shows none', async () => {
+      await poll();
+      assert.equal(mon.listRouters().find((r) => r.name === 'B2').bgpTotal, 0);
+    });
+
+    test('old events are dropped after 90 days', () => {
+      const id = bgpDb.prepare('SELECT id FROM bgp_sessions').get().id;
+      bgpDb.prepare(`INSERT INTO bgp_events (session_id, ts, type) VALUES (?, ?, 'up')`).run(id, 1000);
+      mon.compact(clock);
+      assert.equal(bgpDb.prepare('SELECT COUNT(*) AS n FROM bgp_events WHERE ts = 1000').get().n, 0);
+    });
+  });
+
   test('deleting a router removes its history', () => {
     const router = db.prepare('SELECT * FROM routers').get();
     monitor.deleteRouter(router.id);
@@ -248,6 +440,9 @@ describe('routers API', () => {
     ]) {
       assert.equal((await call(method, url, body, customerCookie)).status, 403, url);
     }
+    assert.equal((await call('GET', '/api/admin/routers/1/live', undefined, customerCookie)).status, 403);
+    assert.equal((await call('GET', '/api/admin/routers/1/bgp/1/events', undefined, customerCookie)).status, 403);
+    assert.equal((await call('PATCH', '/api/admin/routers/1/bgp/1', { label: 'x' }, customerCookie)).status, 403);
     assert.equal((await call('GET', '/api/admin/routers', undefined, '')).status, 401);
   });
 
