@@ -900,36 +900,56 @@ export async function datacenters() {
   );
 }
 
-// Real prefixes only, nested by what contains what, with the first level open. A prefix whose parent is in
-// another datacenter starts its own branch here.
+// Real prefixes only, nested by what contains what, with the first level open. Anything smaller than a /24
+// inside a larger IPv4 prefix is grouped under its /24, which is a heading and not a prefix, and only appears
+// when something is in it. A prefix whose parent is in another datacenter starts its own branch here.
 function prefixTree(list) {
-  const here = new Set(list.map((p) => p.id));
-  const childrenOf = new Map();
-  for (const p of list) {
-    const parent = here.has(p.parentId) ? p.parentId : null;
-    if (!childrenOf.has(parent)) childrenOf.set(parent, []);
-    childrenOf.get(parent).push(p);
+  const nodes = new Map(list.map((p) => [p.id, { key: `prefix:${p.id}`, cidr: p.cidr, prefix: p, kids: [] }]));
+  const tops = [];
+  for (const p of list) (nodes.get(p.parentId)?.kids ?? tops).push(nodes.get(p.id));
+
+  function groupByBlock(node) {
+    if (node.prefix.family !== 4 || node.prefix.length >= 24) return node.kids;
+    const blocks = new Map();
+    const kids = [];
+    for (const kid of node.kids) {
+      if (kid.prefix.length <= 24) {
+        kids.push(kid);
+        continue;
+      }
+      const cidr = `${kid.cidr.split('.').slice(0, 3).join('.')}.0/24`;
+      if (!blocks.has(cidr)) {
+        blocks.set(cidr, { key: `block:${cidr}`, cidr, prefix: null, kids: [] });
+        kids.push(blocks.get(cidr));
+      }
+      blocks.get(cidr).kids.push(kid);
+    }
+    return kids;
   }
-  const kids = (id) => childrenOf.get(id) ?? [];
-  const open = new Set(kids(null).map((p) => p.id));
+  for (const node of nodes.values()) node.kids = groupByBlock(node);
+
+  const open = new Set(tops.map((node) => node.key));
   const holder = h('div', null);
 
-  // Closing a prefix closes everything opened beneath it.
-  function close(id) {
-    open.delete(id);
-    kids(id).forEach((child) => close(child.id));
+  // Closing a row closes everything opened beneath it.
+  function close(node) {
+    open.delete(node.key);
+    node.kids.forEach(close);
   }
 
-  function toggle(p) {
-    if (open.has(p.id)) close(p.id);
-    else open.add(p.id);
+  function toggle(node) {
+    if (open.has(node.key)) close(node);
+    else open.add(node.key);
     render();
-    holder.querySelector(`[data-prefix="${p.id}"]`)?.focus();
+    holder.querySelector(`[data-node="${node.key}"]`)?.focus();
   }
 
-  function row(p, depth) {
-    const inside = kids(p.id).length;
-    const expanded = open.has(p.id);
+  const ownersIn = (node) => [...new Set(node.kids.map((kid) => (kid.prefix.internal ? 'Fiberifi' : kid.prefix.customer ? customerName(kid.prefix.customer) : '')).filter(Boolean))].join(', ');
+
+  function row(node, depth) {
+    const p = node.prefix;
+    const inside = node.kids.length;
+    const expanded = open.has(node.key);
     return h(
       'tr',
       null,
@@ -943,31 +963,31 @@ function prefixTree(list) {
               {
                 class: `chev ${expanded ? 'open' : ''}`,
                 type: 'button',
-                'data-prefix': p.id,
+                'data-node': node.key,
                 'aria-expanded': String(expanded),
-                'aria-label': `${expanded ? 'Close' : 'Open'} ${p.cidr}`,
-                onClick: () => toggle(p),
+                'aria-label': `${expanded ? 'Close' : 'Open'} ${node.cidr}`,
+                onClick: () => toggle(node),
               },
               icon('chevron', 14),
             )
           : h('span', { class: 'chev-space' }),
-        prefixLink(p),
+        p ? prefixLink(p) : h('span', { class: 'mono' }, node.cidr),
         inside && !expanded ? h('span', { class: 'muted' }, ` ${inside} inside`) : '',
       ),
-      h('td', null, statusBadge(p)),
-      h('td', null, ownerName(p)),
-      h('td', null, p.vlan ?? ''),
-      h('td', { class: 'break' }, p.description),
+      h('td', null, p ? statusBadge(p) : badge('Block')),
+      h('td', null, p ? ownerName(p) : ownersIn(node)),
+      h('td', null, p?.vlan ?? ''),
+      h('td', { class: 'break' }, p?.description ?? ''),
     );
   }
 
-  const rowsFor = (p, depth) => [row(p, depth), ...(open.has(p.id) ? kids(p.id).flatMap((child) => rowsFor(child, depth + 1)) : [])];
+  const rowsFor = (node, depth) => [row(node, depth), ...(open.has(node.key) ? node.kids.flatMap((kid) => rowsFor(kid, depth + 1)) : [])];
 
   function render() {
     holder.replaceChildren(
       table(
         [{ label: 'Prefix' }, { label: 'Status' }, { label: 'Customer' }, { label: 'VLAN' }, { label: 'Description' }],
-        kids(null).flatMap((p) => rowsFor(p, 0)),
+        tops.flatMap((node) => rowsFor(node, 0)),
       ),
     );
   }
