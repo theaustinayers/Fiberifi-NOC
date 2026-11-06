@@ -8,7 +8,8 @@ const ROLE_LABEL = { network: 'Network', gateway: 'Gateway', broadcast: 'Broadca
 const STATE = {
   assigned: ['Assigned', 'brand'],
   partial: ['Partly assigned', 'warn'],
-  internal: ['In use', 'good'],
+  internal: ['Internal', 'good'],
+  inuse: ['In use', ''],
   free: ['Free', ''],
 };
 
@@ -20,7 +21,17 @@ function customerLink(customer) {
   return h('a', { href: `#/accounts/${customer.id}` }, customer.company || customer.name);
 }
 
-export function explorerTable(aggregates, { datacenterOptions, customerOptions }) {
+const INTERNAL = 'Fiberifi';
+
+function ownerCell(block) {
+  if (block.customer) return customerLink(block.customer);
+  if (block.state === 'internal') return INTERNAL;
+  const owners = block.customersInside.map(customerLink);
+  if (block.internalInside) owners.push(INTERNAL);
+  return owners.map((owner, i) => [i ? ', ' : '', owner]);
+}
+
+export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
   const open = new Map(); // cidr -> chosen block length, or null for the default
   const shown = new Map(); // cidr -> the blocks last shown inside it
   const body = h('tbody', null);
@@ -62,16 +73,16 @@ export function explorerTable(aggregates, { datacenterOptions, customerOptions }
       go('/datacenters');
       return;
     }
-    const canAssign = block.state === 'free' || block.state === 'internal';
+    const canAssign = ['free', 'inuse', 'internal'].includes(block.state);
     const fields = [
-      canAssign && { name: 'customerId', label: 'Customer', type: 'select', value: '', options: await customerOptions('Not assigned') },
+      canAssign && { name: 'customerId', label: 'Customer', type: 'select', value: '', options: await ownerOptions() },
       { name: 'description', label: 'Description' },
       [
         { name: 'datacenterId', label: 'Datacenter', type: 'select', value: block.datacenterId ?? '', options: datacenters, required: true },
         { name: 'vlan', label: 'VLAN (optional)', type: 'number', min: 1, max: 4094 },
       ],
     ].filter(Boolean);
-    const intro = canAssign ? 'Turns this block into a prefix you can assign.' : 'Keeps this as a label only. It stays with the customer it is assigned to.';
+    const intro = canAssign ? 'Turns this block into a prefix. Choose Internal for space Fiberifi uses itself.' : 'Keeps this as a label only. It stays with the customer it is assigned to.';
     const created = await formDialog({
       title: `Use ${block.cidr}`,
       intro,
@@ -90,8 +101,8 @@ export function explorerTable(aggregates, { datacenterOptions, customerOptions }
       'tr',
       null,
       h('td', { class: 'nowrap' }, chevron(p.cidr, p.cidr), h('a', { class: 'mono', href: `#/prefixes/${p.id}` }, p.cidr)),
-      h('td', null, p.customer ? badge('Assigned', 'brand') : badge('Range')),
-      h('td', null, p.customer ? customerLink(p.customer) : ''),
+      h('td', null, p.internal ? badge('Internal', 'good') : p.customer ? badge('Assigned', 'brand') : badge('Range')),
+      h('td', null, p.customer ? customerLink(p.customer) : p.internal ? INTERNAL : ''),
       h('td', null, meter(p.utilization)),
       h('td', { class: 'break' }, p.description),
       h('td', null, p.datacenter ? h('a', { href: `#/datacenters/${p.datacenter.id}` }, p.datacenter.name) : ''),
@@ -140,7 +151,7 @@ export function explorerTable(aggregates, { datacenterOptions, customerOptions }
       { class: block.state === 'free' ? 'free' : '' },
       h('td', { class: 'nowrap' }, indent(depth), chevron(block.cidr, block.cidr), name),
       h('td', null, badge(label, kind)),
-      h('td', null, block.customer ? customerLink(block.customer) : block.customersInside.length ? block.customersInside.map((c, i) => [i ? ', ' : '', customerLink(c)]) : ''),
+      h('td', null, ownerCell(block)),
       h('td', { class: 'nowrap muted' }, usage),
       h('td', { class: 'break' }, block.description),
       h('td', null, block.datacenter ?? ''),
@@ -171,7 +182,7 @@ export function explorerTable(aggregates, { datacenterOptions, customerOptions }
         h('button', { class: 'cell-link mono', type: 'button', onClick: () => editAddress(row.prefixId, row, render) }, row.ip),
       ),
       h('td', null, status ? badge(status[0], status[1]) : h('span', { class: 'muted' }, 'Free')),
-      h('td', { colSpan: 2 }, row.customer ? customerLink(row.customer) : ''),
+      h('td', { colSpan: 2 }, row.customer ? customerLink(row.customer) : row.internal ? INTERNAL : ''),
       h('td', { class: 'break' }, row.record?.description ?? ''),
       h('td', { class: 'mono', colSpan: 2 }, row.record?.hostname ?? ''),
       h('td', { class: 'mono break' }, row.rdns?.hostname ?? ''),

@@ -34,6 +34,7 @@ const STATUS_LABEL = { container: 'Container', active: 'Active', reserved: 'Rese
 const statusOptions = Object.entries(STATUS_LABEL).map(([value, label]) => ({ value, label }));
 
 function statusBadge(prefix) {
+  if (prefix.internal) return badge('Internal', 'good');
   if (prefix.customer) return badge('Assigned', 'brand');
   return badge(STATUS_LABEL[prefix.status], STATUS_KIND[prefix.status]);
 }
@@ -42,8 +43,20 @@ function customerName(customer) {
   return customer.company || customer.name;
 }
 
+function ownerName(prefix) {
+  if (prefix.internal) return 'Fiberifi';
+  return prefix.customer ? h('a', { href: `#/accounts/${prefix.customer.id}` }, customerName(prefix.customer)) : '';
+}
+
 function prefixLink(prefix) {
   return h('a', { class: 'mono', href: `#/prefixes/${prefix.id}` }, prefix.cidr);
+}
+
+// Customers, plus Fiberifi itself for space it keeps.
+async function ownerOptions(emptyLabel = 'Not assigned') {
+  const customers = await customerOptions();
+  const none = emptyLabel ? [{ value: '', label: emptyLabel }] : [];
+  return [...none, { value: 'internal', label: 'Internal (Fiberifi)' }, ...customers];
 }
 
 async function customerOptions(emptyLabel) {
@@ -161,7 +174,7 @@ export async function prefixes() {
   const load = async () => (await get('/api/admin/prefixes')).prefixes;
   // Fetched on every refresh, so the top level and the filter see prefixes created after the page opened.
   const aggregates = async () => (await load()).filter((p) => p.parentId === null && (!state.family || String(p.family) === state.family));
-  const explorer = explorerTable(aggregates, { datacenterOptions, customerOptions });
+  const explorer = explorerTable(aggregates, { datacenterOptions, ownerOptions });
 
   async function render() {
     const q = state.q.toLowerCase();
@@ -186,7 +199,7 @@ export async function prefixes() {
                 null,
                 h('td', { class: 'nowrap' }, prefixLink(p)),
                 h('td', null, statusBadge(p)),
-                h('td', null, p.customer ? h('a', { href: `#/accounts/${p.customer.id}` }, customerName(p.customer)) : ''),
+                h('td', null, ownerName(p)),
                 h('td', null, meter(p.utilization)),
                 h('td', { class: 'break' }, p.description),
                 h('td', null, p.datacenter ? h('a', { href: `#/datacenters/${p.datacenter.id}` }, p.datacenter.name) : ''),
@@ -265,12 +278,12 @@ async function allocateDialog(prefix, reload, presetLength) {
     title: `Allocate from ${prefix.cidr}`,
     intro: prefix.customer
       ? `Adds a label inside ${customerName(prefix.customer)}'s subnet. It stays theirs and their addresses are not affected.`
-      : 'Takes the first free block of the size you choose.',
+      : `Takes the first free block of the size you choose. Use /${prefix.length} for the whole prefix.`,
     submitLabel: 'Allocate subnet',
     fields: [
       [
-        { name: 'length', label: 'Prefix length', type: 'number', value: suggested, min: prefix.length + 1, max: maxLength, required: true },
-        !prefix.customer && { name: 'customerId', label: 'Customer', type: 'select', value: '', options: await customerOptions('Not assigned') },
+        { name: 'length', label: 'Prefix length', type: 'number', value: suggested, min: prefix.length, max: maxLength, required: true },
+        !prefix.customer && { name: 'customerId', label: 'Customer', type: 'select', value: '', options: await ownerOptions() },
       ].filter(Boolean),
       { name: 'description', label: 'Description' },
       [
@@ -281,7 +294,8 @@ async function allocateDialog(prefix, reload, presetLength) {
     onInput: async ({ length }, setNote) => {
       try {
         const { next } = await get(`/api/admin/prefixes/${prefix.id}/next-available?length=${encodeURIComponent(length)}`);
-        setNote(next ? `Next free: ${next.cidr} (${next.size} addresses)` : `No free /${length} left in this prefix.`);
+        if (next?.whole) setNote(`Uses all of ${next.cidr}. Prefixes already inside it stay as they are.`);
+        else setNote(next ? `Next free: ${next.cidr} (${next.size} addresses)` : `No free /${length} left in this prefix.`);
       } catch (error) {
         setNote(error.message);
       }
@@ -295,17 +309,13 @@ async function allocateDialog(prefix, reload, presetLength) {
 }
 
 async function assignDialog(prefix, reload) {
-  const options = await customerOptions();
-  if (!options.length) {
-    toast('Add a customer account first.', 'warn');
-    return;
-  }
+  const options = await ownerOptions(null);
   const done = await formDialog({
     title: `Assign ${prefix.cidr}`,
-    intro: 'The customer can see this subnet, keep address records in it and set its reverse DNS.',
+    intro: 'A customer can see this subnet, keep address records in it and set its reverse DNS. Internal keeps it for Fiberifi.',
     submitLabel: 'Assign subnet',
     fields: [
-      { name: 'customerId', label: 'Customer', type: 'select', options, required: true },
+      { name: 'customerId', label: 'Assign to', type: 'select', options, required: true },
       {
         name: 'gateway',
         label: 'Gateway',
@@ -326,6 +336,20 @@ async function assignDialog(prefix, reload) {
 function reportPtr(result) {
   if (result.ptrFailed?.length) {
     toast(`${plural(result.ptrFailed.length, 'PTR record')} could not be removed from Cloudflare: ${result.ptrFailed.slice(0, 5).join(', ')}`, 'warn', 12000);
+  }
+}
+
+async function releaseDialog(prefix, reload) {
+  const done = await confirmDialog({
+    title: `Release ${prefix.cidr}?`,
+    body: 'It stops being marked as internal. Address records and PTRs stay as they are.',
+    confirmLabel: 'Release',
+    danger: false,
+    onConfirm: () => post(`/api/admin/prefixes/${prefix.id}/unassign`),
+  });
+  if (done) {
+    toast(`Released ${prefix.cidr}`);
+    reload();
   }
 }
 
@@ -447,7 +471,7 @@ function subnetsTab(prefix, reload) {
             null,
             h('td', { class: 'nowrap' }, prefixLink(c)),
             h('td', null, statusBadge(c)),
-            h('td', null, c.customer ? h('a', { href: `#/accounts/${c.customer.id}` }, customerName(c.customer)) : ''),
+            h('td', null, ownerName(c)),
             h('td', null, meter(c.utilization)),
             h('td', { class: 'break' }, c.description),
           ),
@@ -467,7 +491,7 @@ function subnetsTab(prefix, reload) {
             h(
               'td',
               { class: 'right' },
-              h('button', { class: 'btn sm', type: 'button', onClick: () => allocateDialog(prefix, reload, Math.max(f.length, prefix.length + 1)) }, 'Allocate'),
+              h('button', { class: 'btn sm', type: 'button', onClick: () => allocateDialog(prefix, reload, f.length) }, 'Allocate'),
             ),
           ),
         ),
@@ -526,15 +550,19 @@ export async function prefixDetail({ id }, { reload }) {
         h(
           'p',
           null,
-          prefix.customer ? ['Assigned to ', h('a', { href: `#/accounts/${prefix.customer.id}` }, customerName(prefix.customer)), prefix.description ? ` · ${prefix.description}` : ''] : prefix.description,
+          prefix.internal
+            ? ['Internal use', prefix.description ? ` · ${prefix.description}` : '']
+            : prefix.customer
+              ? ['Assigned to ', h('a', { href: `#/accounts/${prefix.customer.id}` }, customerName(prefix.customer)), prefix.description ? ` · ${prefix.description}` : '']
+              : prefix.description,
         ),
       ),
       h(
         'div',
         { class: 'actions' },
-        prefix.customer
-          ? h('button', { class: 'btn', type: 'button', onClick: () => unassignDialog(prefix, reload) }, 'Unassign')
-          : h('button', { class: 'btn', type: 'button', onClick: () => assignDialog(prefix, reload) }, 'Assign to customer'),
+        prefix.internal && h('button', { class: 'btn', type: 'button', onClick: () => releaseDialog(prefix, reload) }, 'Release'),
+        prefix.customer && h('button', { class: 'btn', type: 'button', onClick: () => unassignDialog(prefix, reload) }, 'Unassign'),
+        !prefix.internal && !prefix.customer && h('button', { class: 'btn', type: 'button', onClick: () => assignDialog(prefix, reload) }, 'Assign'),
         !isSingle && h('button', { class: 'btn primary', type: 'button', onClick: () => allocateDialog(prefix, reload) }, 'Allocate subnet'),
         !isSingle && h('button', { class: 'btn', type: 'button', onClick: () => splitDialog(prefix, reload) }, 'Split'),
         h('button', { class: 'btn', type: 'button', onClick: () => editDialog(prefix, reload) }, 'Edit'),
@@ -908,7 +936,7 @@ export async function datacenterDetail({ id }, { reload }) {
                 null,
                 h('td', { class: 'nowrap' }, prefixLink(p)),
                 h('td', null, statusBadge(p)),
-                h('td', null, p.customer ? h('a', { href: `#/accounts/${p.customer.id}` }, customerName(p.customer)) : ''),
+                h('td', null, ownerName(p)),
                 h('td', null, p.vlan ?? ''),
                 h('td', { class: 'break' }, p.description),
               ),

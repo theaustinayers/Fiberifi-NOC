@@ -137,7 +137,8 @@ export function createApp(db, config) {
   const staticOptions = { immutable: true, maxAge: '30d' };
   app.use('/fonts/inter', express.static(fontsDir('inter'), staticOptions));
   app.use('/fonts/mono', express.static(fontsDir('jetbrains-mono'), staticOptions));
-  app.use(express.static(path.join(root, 'public'), { index: false, maxAge: '1h' }));
+  // Revalidated on every load (a cheap 304), so an upgrade reaches browsers straight away.
+  app.use(express.static(path.join(root, 'public'), { index: false, maxAge: 0 }));
 
   app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();

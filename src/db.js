@@ -141,6 +141,11 @@ const MIGRATIONS = [
       );
     `);
   },
+
+  // 3: prefixes Fiberifi keeps for itself, as distinct from ones nobody has claimed yet.
+  (db) => {
+    db.exec('ALTER TABLE prefixes ADD COLUMN internal INTEGER NOT NULL DEFAULT 0');
+  },
 ];
 
 export function migrate(db) {

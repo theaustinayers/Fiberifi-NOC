@@ -4,6 +4,11 @@ import { ApiError, email as checkEmail, oneOf, positiveInt, requiredText, text, 
 
 const USER_FIELDS = `id, role, parent_id, access, email, name, company, phone, notes, disabled, must_change_password, created_at, last_login_at`;
 
+function ownerNote(prefix) {
+  if (prefix.internal) return 'internal';
+  return prefix.customer ? `to ${prefix.customer.company || prefix.customer.name}` : '';
+}
+
 export function adminRoutes({ db, ipam, rdns, team, audit }) {
   const router = Router();
 
@@ -37,7 +42,7 @@ export function adminRoutes({ db, ipam, rdns, team, audit }) {
   router.get('/prefixes/export.csv', (req, res) => {
     const rows = ipam
       .listPrefixes()
-      .map((p) => [p.cidr, p.status, p.customer?.company || p.customer?.name || '', p.gateway ?? '', p.description, p.datacenter?.name ?? '', p.vlan ?? '']);
+      .map((p) => [p.cidr, p.status, p.internal ? 'Internal' : p.customer?.company || p.customer?.name || '', p.gateway ?? '', p.description, p.datacenter?.name ?? '', p.vlan ?? '']);
     res.type('text/csv');
     res.attachment('prefixes.csv');
     res.send(toCsv(['prefix', 'status', 'customer', 'gateway', 'description', 'datacenter', 'vlan'], rows));
@@ -51,7 +56,7 @@ export function adminRoutes({ db, ipam, rdns, team, audit }) {
 
   router.post('/prefixes/carve', (req, res) => {
     const prefix = ipam.carve(req.body ?? {});
-    audit(req, 'prefix.create', prefix.cidr, prefix.customer ? `to ${prefix.customer.company || prefix.customer.name}` : '');
+    audit(req, 'prefix.create', prefix.cidr, ownerNote(prefix));
     res.status(201).json({ prefix });
   });
 
@@ -83,13 +88,13 @@ export function adminRoutes({ db, ipam, rdns, team, audit }) {
 
   // Access is revoked first. Only then are the PTRs cleared, so a Cloudflare outage cannot delay a revocation.
   router.post('/prefixes/:id/unassign', async (req, res) => {
-    const { previous, recordsRemoved } = ipam.unassignPrefix(req.params.id);
+    const { previous, recordsRemoved, internal } = ipam.unassignPrefix(req.params.id);
     const ptr =
-      req.body?.removeRdns === false
+      internal || req.body?.removeRdns === false
         ? { removed: 0, failed: [] }
         : await rdns.removeRange(previous.family, previous.start_hex, previous.end_hex);
     audit(req, 'prefix.unassign', previous.cidr, {
-      from: previous.customer_name,
+      from: internal ? 'Internal' : previous.customer_name,
       recordsRemoved,
       ptrRemoved: ptr.removed,
       ptrFailed: ptr.failed,
@@ -103,7 +108,7 @@ export function adminRoutes({ db, ipam, rdns, team, audit }) {
 
   router.post('/prefixes/:id/allocate', (req, res) => {
     const prefix = ipam.allocate(req.params.id, req.body ?? {});
-    audit(req, 'prefix.allocate', prefix.cidr, prefix.customer ? `to ${prefix.customer.company || prefix.customer.name}` : '');
+    audit(req, 'prefix.allocate', prefix.cidr, ownerNote(prefix));
     res.status(201).json({ prefix });
   });
 

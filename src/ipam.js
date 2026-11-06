@@ -89,7 +89,10 @@ export function createIpam(db) {
       'SELECT * FROM prefixes WHERE family = ? AND start_hex >= ? AND end_hex <= ? ORDER BY start_hex, length',
     ),
     overlapping: db.prepare('SELECT * FROM prefixes WHERE family = ? AND start_hex <= ? AND end_hex >= ?'),
-    assignedOverlap: db.prepare(
+    internalWithin: db.prepare(
+      'SELECT cidr FROM prefixes WHERE family = ? AND internal = 1 AND id <> ? AND start_hex >= ? AND end_hex <= ? LIMIT 1',
+    ),
+    customerOverlap: db.prepare(
       `SELECT cidr FROM prefixes
        WHERE family = ? AND customer_id IS NOT NULL AND id <> ? AND start_hex <= ? AND end_hex >= ? LIMIT 1`,
     ),
@@ -185,6 +188,7 @@ export function createIpam(db) {
       vlan: row.vlan,
       parentId: row.parent_id ?? null,
       depth: row.depth ?? 0,
+      internal: Boolean(row.internal),
       customer: row.customer_id
         ? { id: row.customer_id, name: row.customer_name, company: row.customer_company, email: row.customer_email }
         : null,
@@ -254,11 +258,45 @@ export function createIpam(db) {
     return Number((prefixSize(child.family, child.length) * 100000n) / span) / 1000;
   }
 
+  // Ownership works by the smallest assignment winning, so a customer can sit inside Fiberifi's own range.
+  // Two things stay refused: sharing an address with another customer, and swallowing a smaller internal block.
   function assertNoAssignedOverlap(family, id, startHex, endHex) {
-    const clash = q.assignedOverlap.get(family, id, endHex, startHex);
+    const clash = q.customerOverlap.get(family, id, endHex, startHex);
     if (clash) {
-      throw new ApiError(409, 'assignment_overlap', `This overlaps ${clash.cidr}, which is already assigned to a customer`);
+      throw new ApiError(409, 'assignment_overlap', `This overlaps ${clash.cidr}, which is already assigned`);
     }
+    const ours = q.internalWithin.get(family, id, startHex, endHex);
+    if (ours) {
+      throw new ApiError(409, 'assignment_overlap', `This contains ${ours.cidr}, which is marked as internal. Release it first.`);
+    }
+  }
+
+  function assertNotInsideCustomer(family, id, startHex, endHex) {
+    const owner = q.covering.all(family, startHex, endHex).find((r) => r.customer_id && r.id !== id);
+    if (owner) {
+      throw new ApiError(409, 'assignment_overlap', `This is inside ${owner.cidr}, which is assigned to a customer`);
+    }
+  }
+
+  // Inserts a prefix and gives it to whoever input.customerId names: a customer, 'internal', or nobody.
+  function claim(p, fields, input, wanted) {
+    const start = toHex(p.network);
+    const end = toHex(p.last);
+    const internal = input.customerId === 'internal';
+    const customerId = !internal && input.customerId ? requireCustomer(input.customerId).id : null;
+    if (customerId) assertNoAssignedOverlap(p.family, 0, start, end);
+    if (internal) assertNotInsideCustomer(p.family, 0, start, end);
+    const owned = internal || customerId;
+    const status = owned ? (wanted === 'container' ? 'active' : wanted) : statusFor(p, wanted);
+    const newId = insertPrefix(p, { ...fields, status });
+    if (customerId) {
+      assertNoPtrOnReserved(q.byId.get(newId));
+      db.prepare(
+        `UPDATE prefixes SET customer_id = ?, assigned_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
+      ).run(customerId, newId);
+    }
+    if (internal) db.prepare('UPDATE prefixes SET internal = 1 WHERE id = ?').run(newId);
+    return newId;
   }
 
   function cleanGateway(value, row) {
@@ -350,7 +388,7 @@ export function createIpam(db) {
   function statusFor(p, wanted) {
     const start = toHex(p.network);
     const end = toHex(p.last);
-    return q.assignedOverlap.get(p.family, 0, end, start) ? 'container' : wanted;
+    return q.customerOverlap.get(p.family, 0, end, start) ? 'container' : wanted;
   }
 
   function createPrefix(input) {
@@ -369,7 +407,7 @@ export function createIpam(db) {
     if (row.customer_id && status === 'container') {
       throw invalid('An assigned subnet cannot be a container', 'status');
     }
-    if (!row.customer_id && status !== 'container' && q.assignedOverlap.get(row.family, row.id, row.end_hex, row.start_hex)) {
+    if (!row.customer_id && status !== 'container' && q.customerOverlap.get(row.family, row.id, row.end_hex, row.start_hex)) {
       throw invalid('A prefix that overlaps an assigned subnet has to stay a container', 'status');
     }
 
@@ -422,10 +460,27 @@ export function createIpam(db) {
     if (row.customer_id) assertNoAssignedOverlap(row.family, row.id, start, end);
   }
 
+  function markInternal(row, gateway) {
+    if (row.customer_id) {
+      throw new ApiError(409, 'already_assigned', `${row.cidr} is assigned to ${row.customer_name}. Unassign it first.`);
+    }
+    assertNotInsideCustomer(row.family, row.id, row.start_hex, row.end_hex);
+    // A container stays one: a main range has no gateway of its own and reserves nothing.
+    const address = row.status === 'container' ? null : cleanGateway(gateway, row);
+    db.prepare(
+      `UPDATE prefixes SET internal = 1, gateway = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
+    ).run(address, row.id);
+    return { prefix: getPrefix(row.id), customer: { company: 'Internal' } };
+  }
+
   function assignPrefix(id, { customerId, gateway }) {
     return transaction(db, () => {
       const row = requirePrefix(id);
+      if (customerId === 'internal') return markInternal(row, gateway);
       const customer = requireCustomer(customerId);
+      if (row.internal) {
+        throw new ApiError(409, 'already_assigned', `${row.cidr} is marked as internal. Release it first.`);
+      }
       if (row.customer_id && row.customer_id !== customer.id) {
         throw new ApiError(409, 'already_assigned', `${row.cidr} is assigned to ${row.customer_name}. Unassign it first.`);
       }
@@ -446,6 +501,11 @@ export function createIpam(db) {
   function unassignPrefix(id) {
     return transaction(db, () => {
       const row = requirePrefix(id);
+      // Internal records and PTRs are Fiberifi's own, so releasing a block keeps them.
+      if (row.internal) {
+        db.prepare(`UPDATE prefixes SET internal = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`).run(row.id);
+        return { previous: row, recordsRemoved: 0, internal: true };
+      }
       if (!row.customer_id) throw new ApiError(409, 'not_assigned', `${row.cidr} is not assigned`);
       const { changes } = db
         .prepare('DELETE FROM ip_records WHERE family = ? AND ip_hex BETWEEN ? AND ?')
@@ -468,12 +528,31 @@ export function createIpam(db) {
 
   function suggestNext(id, length) {
     const row = requirePrefix(id);
+    if (Number(length) === row.length) return { cidr: row.cidr, size: sizeLabel(row.family, row.length), whole: true };
     const n = checkChildLength(row, length);
     const next = nextAvailable(bounds(row), directChildren(row).map(bounds), n);
     return next ? { cidr: next.cidr, size: sizeLabel(next.family, next.length) } : null;
   }
 
+  // Allocating a prefix at its own size means using the whole thing, so it is updated rather than subdivided.
+  function useWhole(row, input) {
+    const fields = prefixFields({
+      ...row,
+      datacenterId: input.datacenterId,
+      description: input.description || row.description,
+      vlan: input.vlan || row.vlan,
+    });
+    if (!fields.datacenter_id) throw invalid('Choose a datacenter', 'datacenterId');
+    if (input.customerId) assignPrefix(row.id, { customerId: input.customerId, gateway: row.gateway });
+    db.prepare(
+      `UPDATE prefixes SET description = ?, datacenter_id = ?, vlan = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
+    ).run(fields.description, fields.datacenter_id, fields.vlan, row.id);
+    return getPrefix(row.id);
+  }
+
   function allocate(id, input) {
+    const whole = requirePrefix(id);
+    if (Number(input.length) === whole.length) return useWhole(whole, input);
     return transaction(db, () => {
       const row = requirePrefix(id);
       const n = checkChildLength(row, input.length);
@@ -482,17 +561,7 @@ export function createIpam(db) {
       const fields = prefixFields(input);
       if (!fields.datacenter_id) throw invalid('Choose a datacenter', 'datacenterId');
       const status = input.status ? oneOf(input.status, PREFIX_STATUSES, 'status') : 'active';
-      const customerId = input.customerId ? requireCustomer(input.customerId).id : null;
-      if (customerId) assertNoAssignedOverlap(next.family, 0, toHex(next.network), toHex(next.last));
-      const newStatus = customerId ? (status === 'container' ? 'active' : status) : statusFor(next, status);
-      const newId = insertPrefix(next, { ...fields, status: newStatus });
-      if (customerId) {
-        assertNoPtrOnReserved(q.byId.get(newId));
-        db.prepare(
-          `UPDATE prefixes SET customer_id = ?, assigned_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-        ).run(customerId, newId);
-      }
-      return getPrefix(newId);
+      return getPrefix(claim(next, fields, input, status));
     });
   }
 
@@ -506,16 +575,7 @@ export function createIpam(db) {
       if (!q.covering.all(p.family, start, end).length) throw invalid(`${p.cidr} is not inside any of your prefixes`, 'cidr');
       const fields = prefixFields(input);
       if (!fields.datacenter_id) throw invalid('Choose a datacenter', 'datacenterId');
-      const customerId = input.customerId ? requireCustomer(input.customerId).id : null;
-      if (customerId) assertNoAssignedOverlap(p.family, 0, start, end);
-      const newId = insertPrefix(p, { ...fields, status: customerId ? 'active' : statusFor(p, 'active') });
-      if (customerId) {
-        assertNoPtrOnReserved(q.byId.get(newId));
-        db.prepare(
-          `UPDATE prefixes SET customer_id = ?, assigned_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-        ).run(customerId, newId);
-      }
-      return getPrefix(newId);
+      return getPrefix(claim(p, fields, input, 'active'));
     });
   }
 
@@ -661,7 +721,7 @@ export function createIpam(db) {
         const hex = toHex(block.network);
         const over = smallestCovering(hex, hex);
         const owner = over.find((r) => r.customer_id);
-        return { ...toRow(hex), prefixId: over[0].id, customer: owner ? customerOf(owner) : null };
+        return { ...toRow(hex), prefixId: over[0].id, customer: owner ? customerOf(owner) : null, internal: over.some((r) => r.internal) };
       });
       return { cidr: p.cidr, length, options, kind: 'addresses', rows };
     }
@@ -674,12 +734,16 @@ export function createIpam(db) {
       const owner = over.find((r) => r.customer_id);
       const within = known.filter((r) => r.start_hex >= from && r.end_hex <= to && r.length > length);
       const assignedWithin = within.filter((r) => r.customer_id);
+      const ours = over.some((r) => r.internal);
+      const oursWithin = within.some((r) => r.internal);
       const customersInside = [...new Map(assignedWithin.map((r) => [r.customer_id, customerOf(r)])).values()].slice(0, 3);
       const inUse = within.length > 0 || over.some((r) => r.status !== 'container');
       let state = 'free';
       if (owner) state = 'assigned';
       else if (assignedWithin.length) state = 'partial';
-      else if (inUse) state = 'internal';
+      else if (ours) state = 'internal';
+      else if (oursWithin) state = 'partial';
+      else if (inUse) state = 'inuse';
       return {
         cidr: block.cidr,
         length,
@@ -687,6 +751,7 @@ export function createIpam(db) {
         prefixId: exact?.id ?? null,
         customer: owner ? customerOf(owner) : null,
         customersInside,
+        internalInside: oursWithin,
         description: exact?.description ?? '',
         datacenter: over.find((r) => r.datacenter_name)?.datacenter_name ?? null,
         datacenterId: over.find((r) => r.datacenter_id)?.datacenter_id ?? null,

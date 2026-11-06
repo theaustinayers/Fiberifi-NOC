@@ -752,6 +752,132 @@ describe('NOC API', () => {
     });
   });
 
+  describe('internal space', () => {
+    let block;
+
+    test('a block can be kept for Fiberifi straight from the drill-down', async () => {
+      const res = await admin.post('/api/admin/prefixes/carve', { cidr: '206.168.246.0/24', customerId: 'internal', datacenterId, description: 'Core' });
+      assert.equal(res.status, 201, JSON.stringify(res.data));
+      block = res.data.prefix;
+      assert.equal(block.internal, true);
+      assert.equal(block.customer, null);
+      assert.equal(block.status, 'active');
+      const { data } = await admin.get('/api/admin/explore?cidr=206.168.244.0/22');
+      const row = data.rows.find((r) => r.cidr === '206.168.246.0/24');
+      assert.equal(row.state, 'internal');
+      assert.equal((await admin.get('/api/admin/explore?cidr=206.168.246.0/24&length=28')).data.rows[0].state, 'internal');
+    });
+
+    test('allocation and assignment accept it too', async () => {
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      const parent = tree.prefixes.find((p) => p.cidr === '149.112.89.0/24');
+      const res = await admin.post(`/api/admin/prefixes/${parent.id}/allocate`, { length: 30, customerId: 'internal', datacenterId });
+      assert.equal(res.status, 201, JSON.stringify(res.data));
+      assert.equal(res.data.prefix.internal, true);
+      const free = await allocate(parent.id, 30);
+      const marked = await admin.post(`/api/admin/prefixes/${free.id}/assign`, { customerId: 'internal' });
+      assert.equal(marked.status, 200, JSON.stringify(marked.data));
+      assert.equal(marked.data.prefix.internal, true);
+    });
+
+    test('a customer cannot be assigned over it, or see it', async () => {
+      const direct = await admin.post(`/api/admin/prefixes/${block.id}/assign`, { customerId: acmeId });
+      assert.equal(direct.status, 409);
+      const around = await admin.post('/api/admin/prefixes/carve', { cidr: '206.168.246.0/23', customerId: acmeId, datacenterId });
+      assert.equal(around.status, 409, 'a block that swallows internal space is refused');
+      assert.equal(around.data.error.code, 'assignment_overlap');
+      assert.equal((await acme.get(`/api/subnets/${block.id}`)).status, 404);
+      assert.equal((await acme.put('/api/subnets/' + block.id + '/addresses/206.168.246.5', { hostname: 'x' })).status, 404);
+    });
+
+    test('customer space cannot be marked internal', async () => {
+      const { data } = await acme.get('/api/subnets');
+      const taken = await admin.post(`/api/admin/prefixes/${data.subnets[0].id}/assign`, { customerId: 'internal' });
+      assert.equal(taken.status, 409);
+      const single = data.subnets[0].family === 4 ? 32 : 128;
+      const inside = await admin.post('/api/admin/prefixes/carve', { cidr: `${data.subnets[0].lastAddress}/${single}`, customerId: 'internal', datacenterId });
+      assert.equal(inside.status, 409);
+    });
+
+    test('a customer can sit inside internal space, and the smallest assignment wins', async () => {
+      const carved = await admin.post('/api/admin/prefixes/carve', { cidr: '206.168.246.16/28', customerId: acmeId, datacenterId });
+      assert.equal(carved.status, 201, JSON.stringify(carved.data));
+      const { data } = await admin.get('/api/admin/explore?cidr=206.168.246.0/24&length=28');
+      assert.equal(data.rows[0].state, 'internal');
+      assert.equal(data.rows[1].state, 'assigned');
+      assert.equal(data.rows[1].customer.id, acmeId);
+      const id = carved.data.prefix.id;
+      assert.equal((await acme.put(`/api/subnets/${id}/addresses/206.168.246.18`, { hostname: 'mine' })).status, 200);
+      assert.equal((await acme.put(`/api/subnets/${id}/addresses/206.168.246.40`, { hostname: 'ours' })).status, 400);
+      assert.equal((await acme.put(`/api/subnets/${block.id}/addresses/206.168.246.40`, { hostname: 'ours' })).status, 404);
+      await admin.post(`/api/admin/prefixes/${id}/unassign`, {});
+      await admin.delete(`/api/admin/prefixes/${id}`);
+    });
+
+    test('a whole range can be used at its own size without subdividing it', async () => {
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      const range = tree.prefixes.find((p) => p.cidr === '2001:504:13a::/48');
+      await admin.patch(`/api/admin/prefixes/${range.id}`, { description: 'Fiberifi allocation' });
+      const hint = await admin.get(`/api/admin/prefixes/${range.id}/next-available?length=48`);
+      assert.equal(hint.data.next.whole, true);
+      assert.equal((await admin.post(`/api/admin/prefixes/${range.id}/allocate`, { length: 48 })).status, 400);
+      const res = await admin.post(`/api/admin/prefixes/${range.id}/allocate`, { length: 48, customerId: 'internal', datacenterId, vlan: 200 });
+      assert.equal(res.status, 201, JSON.stringify(res.data));
+      assert.equal(res.data.prefix.cidr, '2001:504:13a::/48');
+      assert.equal(res.data.prefix.internal, true);
+      assert.equal(res.data.prefix.datacenter.id, datacenterId);
+      assert.equal(res.data.prefix.vlan, 200);
+      assert.equal(res.data.prefix.description, 'Fiberifi allocation', 'a blank description keeps the old one');
+      assert.equal(res.data.prefix.status, 'container');
+      assert.equal(res.data.prefix.gateway, null, 'a main range reserves nothing');
+      assert.equal(res.data.prefix.network, null);
+
+      const child = await admin.post(`/api/admin/prefixes/${range.id}/allocate`, { length: 64, customerId: acmeId, datacenterId });
+      assert.equal(child.status, 201, 'customers can still be assigned inside it');
+      await admin.post(`/api/admin/prefixes/${child.data.prefix.id}/unassign`, {});
+      await admin.delete(`/api/admin/prefixes/${child.data.prefix.id}`);
+    });
+
+    test('a range with customers already inside can be marked internal', async () => {
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      const range = tree.prefixes.find((p) => p.cidr === '149.112.89.0/24');
+      assert.ok(range.childCount > 0);
+      const res = await admin.post(`/api/admin/prefixes/${range.id}/allocate`, { length: 24, customerId: 'internal', datacenterId });
+      assert.equal(res.status, 201, JSON.stringify(res.data));
+      const { data: subnets } = await acme.get('/api/subnets');
+      assert.ok(subnets.subnets.length > 0, 'nobody loses a subnet');
+      await admin.post(`/api/admin/prefixes/${range.id}/unassign`, {});
+    });
+
+    test('real subnets with gateways can live inside it', async () => {
+      const child = await admin.post('/api/admin/prefixes/carve', { cidr: '206.168.246.0/30', datacenterId });
+      assert.equal(child.status, 201, JSON.stringify(child.data));
+      assert.equal(child.data.prefix.status, 'active');
+      assert.equal(child.data.prefix.gateway, '206.168.246.1');
+    });
+
+    test('gateway and broadcast stay locked in internal space', async () => {
+      assert.equal((await admin.put(`/api/subnets/${block.id}/addresses/206.168.246.255`, { hostname: 'x' })).status, 403);
+      assert.equal((await admin.put(`/api/subnets/${block.id}/rdns/206.168.246.255`, { hostname: 'x.fiberifi.example' })).status, 403);
+    });
+
+    test('releasing keeps its records and allows assignment again', async () => {
+      assert.equal((await admin.put(`/api/subnets/${block.id}/addresses/206.168.246.9`, { hostname: 'router1' })).status, 200);
+      const res = await admin.post(`/api/admin/prefixes/${block.id}/unassign`, {});
+      assert.equal(res.status, 200, JSON.stringify(res.data));
+      assert.equal(res.data.prefix.internal, false);
+      assert.equal(res.data.recordsRemoved, 0);
+      assert.equal(res.data.prefix.recordCount, 1);
+      assert.equal((await admin.post(`/api/admin/prefixes/${block.id}/assign`, { customerId: acmeId })).status, 200);
+      const back = await admin.post(`/api/admin/prefixes/${block.id}/unassign`, {});
+      assert.equal(back.status, 200);
+    });
+
+    test('customers cannot mark anything internal', async () => {
+      assert.equal((await acme.post('/api/admin/prefixes/carve', { cidr: '206.168.247.0/24', customerId: 'internal' })).status, 403);
+    });
+  });
+
   describe('prefix ownership', () => {
     let mine;
     let theirs;
@@ -1017,7 +1143,8 @@ test('upgrading a live database keeps everything and turns sites into datacenter
   migrate(db);
   migrate(db);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.equal(db.prepare('SELECT internal FROM prefixes LIMIT 1').get().internal, 0);
   assert.equal(db.prepare('SELECT account_id FROM rdns_records WHERE ip = ?').get('10.0.0.5').account_id, 1);
   assert.equal(db.prepare('SELECT account_id FROM rdns_records WHERE ip = ?').get('10.0.0.6').account_id, null);
   assert.deepEqual(db.prepare('SELECT name FROM datacenters ORDER BY name').all().map((d) => d.name), ['IAD', 'PIT1']);
