@@ -1,14 +1,125 @@
-# Fiberifi NOC panel
+<p align="center">
+  <img src="docs/images/hero.png" alt="Fiberifi Network Operations: every prefix, every address, one panel." width="100%">
+</p>
 
-The network operations panel for `noc.fiberifi.com`: IPAM for Fiberifi's address space, and a customer portal for assigned subnets and reverse DNS.
+<p align="center">
+  <img src="https://img.shields.io/badge/Node.js-24-2377e9?style=flat-square" alt="Node.js 24">
+  <img src="https://img.shields.io/badge/Ubuntu-26.04-2377e9?style=flat-square" alt="Ubuntu 26.04">
+  <img src="https://img.shields.io/badge/IPv4_%26_IPv6-ready-2377e9?style=flat-square" alt="IPv4 and IPv6">
+  <img src="https://img.shields.io/badge/rDNS-Cloudflare-2377e9?style=flat-square" alt="Reverse DNS through Cloudflare">
+</p>
 
-Node.js 24, Express and SQLite (built into Node). There is no build step and no native dependency.
+<h3 align="center">The network operations panel behind <a href="https://noc.fiberifi.com">noc.fiberifi.com</a></h3>
+
+<p align="center">
+  Fiberifi NOC is IPAM and a customer portal in one. Admins see every prefix down to a single address.<br>
+  Customers manage their own subnets, teams and reverse DNS, without opening a ticket.
+</p>
+
+<p align="center">
+  <a href="#install-on-ubuntu-2604"><b>Install</b></a> ·
+  <a href="#see-it-in-action"><b>Screenshots</b></a> ·
+  <a href="#connect-cloudflare"><b>Connect Cloudflare</b></a> ·
+  <a href="#security"><b>Security</b></a>
+</p>
+
+---
+
+## Why it's different
+
+| | |
+|---|---|
+| 🔎 **Drill all the way down** | Open a `/22` into `/24`s, then smaller blocks, then single addresses. Blocks don't need to exist first, and assignments update live. |
+| 🧩 **Nest prefixes freely** | Keep a whole range as your own and place customers inside it. The smallest assignment wins, and an address can never belong to two customers. |
+| 🌐 **Self-service reverse DNS** | Customers publish their own PTR records, straight to Cloudflare, only for addresses they own. |
+| 👥 **Customer teams** | Each customer can add their own Admin and Read only logins. |
+| 🔒 **Safe by default** | Gateway and broadcast addresses are worked out for every prefix and protected on the server, not just greyed out in the browser. |
+| ⚡ **One command to install** | A single script sets up a clean Ubuntu server, with HTTPS included. No build step and no separate database server. |
+
+## See it in action
+
+### Drill down to any address
+
+Start at your main range and open it level by level, with live assignments at every step. Turn any free block into a subnet with one click.
+
+<img src="docs/images/drilldown.png" alt="The Prefixes page with a /22 opened down to individual addresses, showing assignments for each block." width="100%">
+
+### See the whole network at a glance
+
+Allocation across every range, and everything that changed recently.
+
+<img src="docs/images/overview.png" alt="The Overview page, with totals, allocation meters and recent activity." width="100%">
+
+### Give customers their own portal
+
+Customers see only their own subnets. They keep records for each address, with the network, gateway and broadcast locked for them.
+
+<img src="docs/images/customer-subnet.png" alt="A customer's subnet page, listing addresses with locked network, gateway and broadcast rows." width="100%">
+
+### Reverse DNS without a ticket
+
+One dialog for an address's record and its PTR. Saving publishes straight to public DNS, and a PTR is always optional.
+
+<img src="docs/images/address-dialog.png" alt="The address dialog with hostname, status, description and PTR fields." width="100%">
+
+<table>
+  <tr>
+    <td width="50%"><b>Customer teams</b><br>Admin and Read only logins, managed by the customer.<br><br><img src="docs/images/team.png" alt="The Team page, listing an owner, an Admin and a Read only member."></td>
+    <td width="50%"><b>Datacenters</b><br>See what's deployed where.<br><br><img src="docs/images/datacenters.png" alt="A datacenter page, listing the prefixes deployed there."></td>
+  </tr>
+</table>
+
+### Know your DNS is ready
+
+Test the Cloudflare connection and see which reverse zones are in place for every range.
+
+<img src="docs/images/settings.png" alt="The Settings page, showing the Cloudflare connection and reverse zone coverage." width="100%">
+
+*Screenshots use invented customers.*
+
+## How ownership works
+
+<img src="docs/images/ownership.png" alt="A diagram of a /22 opened to /24, /28 and /32. The range is internal, one /28 belongs to a customer, and network and broadcast are blocked." width="100%">
+
+Every prefix automatically gets a gateway on its first usable address and a broadcast on its last. When prefixes nest, the smallest one decides what an address is.
+
+## What's included
+
+**For your team**
+
+- Add, edit, split, nest and delete prefixes, for IPv4 and IPv6
+- Allocate the next free block, or type the exact subnet you want
+- Mark space as Internal, or assign it to a customer
+- Address records with hostname, status, device, MAC and notes
+- Datacenters, VLANs, and search across everything
+- CSV export, and a full audit log of every sign-in and change
+
+**For your customers**
+
+- Their assigned subnets, with gateway, broadcast and usable addresses
+- Records for their own space
+- Reverse DNS on any usable address
+- Their own team logins, with Admin or Read only access
+
+## Security
+
+- **Scoped on the server.** Every request is checked against the account's own subnets. Another customer's subnet looks identical to one that doesn't exist.
+- **Passwords** are hashed with scrypt, and first sign-in forces a new one.
+- **Sessions** use `__Host-` HttpOnly, Secure, SameSite=Strict cookies, with a second cross-site check on every write.
+- **The Cloudflare token** is encrypted with AES-256-GCM and never sent back to the browser.
+- **Sign-in and DNS changes** are rate limited.
+- **A strict Content Security Policy** allows no third-party scripts, styles or fonts.
+- **The service** runs as an unprivileged user in a systemd sandbox, and can only write to its own data folder.
+
+## Under the hood
+
+<img src="docs/images/architecture.png" alt="A diagram of the browser connecting through Caddy to the NOC panel, which uses SQLite for storage and Cloudflare for public DNS." width="100%">
 
 ## Install on Ubuntu 26.04
 
 Tested on a clean Ubuntu 26.04.1 LTS system.
 
-**1. Point DNS at the server.** Create `A` and `AAAA` records for `noc.fiberifi.com`, and make sure ports 80 and 443 are reachable. The TLS certificate is issued automatically once this is done.
+**1. Point DNS at the server.** Create `A` and `AAAA` records for `noc.fiberifi.com`, and make sure ports 80 and 443 are reachable. The TLS certificate is issued automatically once this is done. If your DNS is in Cloudflare, set these records to **DNS only**, because proxying them causes a redirect loop.
 
 **2. Download and install on the server.**
 
@@ -64,7 +175,6 @@ The token is encrypted in the database and never sent back to the browser.
 - **`/31`, `/127` and `/32`.** Point-to-point subnets have no network or broadcast address. A single address has no gateway.
 - **IPv6.** There is no broadcast, and the first address is treated as the network address. Because these subnets are enormous, only addresses with records are listed. Use **Add address** to create one.
 - **Unassigning a subnet** removes the customer's access first, then deletes their address records and PTRs so the next customer inherits nothing. If Cloudflare is unreachable, the access is still removed and the admin is told which PTRs are left over. They can be cleared from the prefix's Addresses tab.
-- **Assignments cannot overlap.** A subnet cannot be assigned if a parent or child of it is already assigned.
 - **Default ranges** are seeded once. A deleted range stays deleted.
 - **Team members.** A customer's owner login and any team member with Admin access can add logins to the account from the Team page. Admin members can edit records and rDNS and manage the team. Read-only members can view and export. Disabling or deleting a customer also cuts off its team.
 - **Datacenters.** Managed under Datacenters in the menu. Allocating a subnet requires one, and VLAN is optional. A datacenter cannot be deleted while prefixes use it.
@@ -94,3 +204,11 @@ npm test
 ```
 
 The tests run against a mock Cloudflare API in `test/mock-cloudflare.js`. Set `CLOUDFLARE_API_BASE` to point the app at a different API endpoint.
+
+## Not included yet
+
+Two-factor sign-in, password resets by email, CSV import, bulk rDNS and scheduled backups.
+
+---
+
+<p align="center">Built by <a href="https://fiberifi.com">Fiberifi</a>.</p>

@@ -105,7 +105,7 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
       h('td', null, p.customer ? customerLink(p.customer) : p.internal ? INTERNAL : ''),
       h('td', null, meter(p.utilization)),
       h('td', { class: 'break' }, p.description),
-      h('td', null, p.datacenter ? h('a', { href: `#/datacenters/${p.datacenter.id}` }, p.datacenter.name) : ''),
+      h('td', { class: 'nowrap' }, p.datacenter ? h('a', { href: `#/datacenters/${p.datacenter.id}` }, p.datacenter.name) : ''),
       h('td', null, p.vlan ?? ''),
       h('td', null, ''),
     );
@@ -154,7 +154,7 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
       h('td', null, ownerCell(block)),
       h('td', { class: 'nowrap muted' }, usage),
       h('td', { class: 'break' }, block.description),
-      h('td', null, block.datacenter ?? ''),
+      h('td', { class: 'nowrap' }, block.datacenter ?? ''),
       h('td', null, block.vlan ?? ''),
       h('td', { class: 'right' }, block.prefixId ? '' : h('button', { class: 'btn sm', type: 'button', onClick: () => useBlock(block) }, 'Use block')),
     );
@@ -181,10 +181,10 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
         h('button', { class: 'cell-link mono', type: 'button', onClick: () => editAddress(row.prefixId, row, render) }, row.ip),
       ),
       h('td', null, statusCell(row)),
-      h('td', { colSpan: 2 }, row.customer ? customerLink(row.customer) : row.internal ? INTERNAL : ''),
+      h('td', null, row.customer ? customerLink(row.customer) : row.internal ? INTERNAL : ''),
+      h('td', { class: 'mono' }, row.record?.hostname ?? ''),
       h('td', { class: 'break' }, row.record?.description ?? ''),
-      h('td', { class: 'mono', colSpan: 2 }, row.record?.hostname ?? ''),
-      h('td', { class: 'mono break' }, row.rdns?.hostname ?? ''),
+      h('td', { class: 'mono', colSpan: 3 }, row.rdns?.hostname ?? ''),
     );
   }
 
