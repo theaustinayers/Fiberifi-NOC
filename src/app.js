@@ -12,6 +12,7 @@ import { authRoutes } from './routes/auth.js';
 import { routerRoutes } from './routes/routers.js';
 import { subnetRoutes } from './routes/subnets.js';
 import { teamRoutes } from './routes/team.js';
+import { createSync } from './sync.js';
 import { createTeam } from './team.js';
 import { ApiError } from './validate.js';
 
@@ -51,10 +52,12 @@ export function createApp(db, config) {
     }),
   );
 
+  const ipam = createIpam(db);
   const ctx = {
     db,
     config,
-    ipam: createIpam(db),
+    ipam,
+    sync: createSync(db, config, ipam),
     rdns: createRdns(db, config),
     team: createTeam(db),
     monitor: createMonitor(db, config),

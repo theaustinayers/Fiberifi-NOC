@@ -1,7 +1,46 @@
 import { Router } from 'express';
+import { createLimiter, verifyPassword } from '../lib/security.js';
+import { ApiError } from '../validate.js';
 
-export function routerRoutes({ monitor, audit }) {
+export function routerRoutes({ monitor, sync, audit }) {
   const router = Router();
+  const applyAttempts = createLimiter({ windowMs: 60 * 1000, max: 5 });
+
+  router.get('/sync/settings', (req, res) => {
+    const { fingerprint, ...settings } = sync.settings();
+    res.json({ settings: { ...settings, fingerprint: Boolean(fingerprint) } });
+  });
+
+  router.put('/sync/settings', (req, res) => {
+    sync.saveSettings(req.body ?? {});
+    audit(req, 'settings.update', 'router-api', { keyChanged: Boolean(req.body?.key) });
+    res.json({ ok: true });
+  });
+
+  router.post('/sync/test', async (req, res) => {
+    const { addresses } = await sync.testConnection();
+    audit(req, 'router.sync_test', sync.settings().url);
+    res.json({ addresses });
+  });
+
+  router.get('/sync/plan', async (req, res) => res.json(await sync.plan()));
+
+  // Changes a live core router, so it asks for the password again even in a signed-in session.
+  router.post('/sync/apply', async (req, res) => {
+    if (!applyAttempts.allow(req.user.id)) throw new ApiError(429, 'rate_limited', 'Too many attempts. Wait a minute and try again.');
+    if (!(await verifyPassword(String(req.body?.password ?? ''), req.user.password_hash))) {
+      audit(req, 'router.sync_refused', '', 'wrong password');
+      throw new ApiError(403, 'bad_password', 'That password is not correct', { field: 'password' });
+    }
+    try {
+      const applied = await sync.apply(req.body?.ids);
+      audit(req, 'router.sync_apply', sync.settings().interface, applied.map((change) => `${change.op} ${change.address}`).join(', '));
+      res.json({ applied: applied.length });
+    } catch (error) {
+      audit(req, 'router.sync_failed', sync.settings().interface, error.message);
+      throw error;
+    }
+  });
 
   router.get('/settings', (req, res) => res.json({ snmp: monitor.getSettings() }));
 

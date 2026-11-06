@@ -1,6 +1,7 @@
 import { addressTable } from './addresses.js';
 import { ApiFailure, buildForm, emptyState, get, go, h, icon, meter, notice, pageHead, panel, plural, post, session, table, toast } from './lib.js';
 import * as routerViews from './views-routers.js';
+import { routerSync } from './views-sync.js';
 import { teamView } from './team.js';
 import * as admin from './views-admin.js';
 
@@ -188,6 +189,7 @@ const ADMIN_ROUTES = [
   [/^\/datacenters$/, admin.datacenters, 'Datacenters'],
   [/^\/datacenters\/(?<id>\d+)$/, admin.datacenterDetail, 'Datacenter'],
   [/^\/routers$/, routerViews.routers, 'Routers'],
+  [/^\/routers\/sync$/, routerSync, 'Router changes'],
   [/^\/routers\/(?<id>\d+)$/, routerViews.routerDetail, 'Router'],
   [/^\/accounts$/, admin.accounts, 'Accounts'],
   [/^\/accounts\/(?<id>\d+)$/, admin.accountDetail, 'Account'],

@@ -245,6 +245,7 @@ tbody tr.explore-head:hover td { background: var(--bg); }
 .chart-title { margin-bottom: 8px; color: var(--ink-3); }
 .chart-title b { color: var(--ink); }
 .live-pill { margin-left: 8px; }
+.commands { margin: 0; padding: 10px 12px; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 500 12.5px/1.6 var(--mono); border-radius: var(--radius-sm); background: var(--bg); border: 1px solid var(--line-strong); }
 .bgp-detail { border-top: 1px solid var(--line); }
 .bgp-log-title { margin: 0; padding: 12px 14px; border-top: 1px solid var(--line); }
 tr.selected td { background: rgb(94 170 253 / 0.08); }

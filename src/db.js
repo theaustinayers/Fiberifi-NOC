@@ -262,6 +262,17 @@ const MIGRATIONS = [
       CREATE INDEX bgp_events_session ON bgp_events (session_id, ts);
     `);
   },
+
+  // 6: addresses on a router that the panel has matched to a prefix. Only these can ever be offered for removal.
+  (db) => {
+    db.exec(`
+      CREATE TABLE router_addresses (
+        address TEXT PRIMARY KEY,
+        label TEXT NOT NULL DEFAULT '',
+        cidr TEXT NOT NULL DEFAULT ''
+      );
+    `);
+  },
 ];
 
 export function migrate(db) {

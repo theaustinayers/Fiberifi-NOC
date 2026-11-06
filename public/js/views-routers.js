@@ -153,6 +153,7 @@ export async function routers() {
     'div',
     null,
     pageHead('Routers', 'Live status from SNMP. This page updates by itself.', [
+      h('a', { class: 'btn', href: '#/routers/sync' }, 'Router changes'),
       h('button', { class: 'btn primary', type: 'button', onClick: add }, icon('plus', 14), 'Add router'),
     ]),
     banner,
