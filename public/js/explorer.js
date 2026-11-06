@@ -1,6 +1,6 @@
 // The drill-down on the Prefixes page: open a range into smaller blocks, all the way to single addresses.
 // Blocks do not have to exist as prefixes. They are worked out on the server from what is assigned right now.
-import { editAddress, removePtrButton, rowClass, statusCell } from './addresses.js';
+import { descriptionOf, editAddress, removePtrButton, rowClass, statusCell } from './addresses.js';
 import { badge, formDialog, get, go, h, icon, meter, plural, post, toast } from './lib.js';
 
 const REFRESH_MS = 15000;
@@ -183,7 +183,7 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
       h('td', null, statusCell(row)),
       h('td', null, row.customer ? customerLink(row.customer) : row.internal ? INTERNAL : ''),
       h('td', { class: 'mono' }, row.record?.hostname ?? ''),
-      h('td', { class: 'break' }, row.record?.description ?? ''),
+      h('td', { class: 'break' }, descriptionOf(row)),
       h('td', { class: 'mono', colSpan: 3 }, row.rdns?.hostname ?? ''),
     );
   }

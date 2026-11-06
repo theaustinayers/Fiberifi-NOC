@@ -949,6 +949,16 @@ describe('NOC API', () => {
       await admin.delete(`/api/admin/prefixes/${label.data.prefix.id}`);
     });
 
+    test('a gateway is labelled automatically, for admins and customers', async () => {
+      const { data: mine } = await acme.get('/api/subnets');
+      const subnet = mine.subnets.find((s) => s.family === 4);
+      const own = (await acme.get(`/api/subnets/${subnet.id}/addresses`)).data.rows;
+      assert.equal(own.find((r) => r.ip === subnet.gateway).note, 'Main Gateway - Unusable');
+      assert.ok(own.filter((r) => r.ip !== subnet.gateway).every((r) => r.note === null));
+      const range = (await admin.get('/api/admin/explore?cidr=206.168.244.0/30&length=32')).data.rows;
+      assert.equal(range.find((r) => r.role === 'gateway').note, 'Main Gateway - Unusable');
+    });
+
     test('customers still see the gateway locked', async () => {
       const { data } = await acme.get('/api/subnets');
       const subnet = data.subnets.find((s) => s.family === 4);

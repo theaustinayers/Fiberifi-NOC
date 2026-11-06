@@ -24,6 +24,7 @@ import { ApiError, invalid, mac, oneOf, text, vlan } from './validate.js';
 export const PREFIX_STATUSES = ['container', 'active', 'reserved', 'deprecated'];
 export const RECORD_STATUSES = ['in_use', 'reserved', 'dhcp'];
 const PAGE_SIZE = 256;
+const GATEWAY_NOTE = 'Main Gateway - Unusable';
 const MAX_SPLIT = 256;
 const MAX_EXPLORE_BITS = 8; // 256 rows per level
 
@@ -671,6 +672,8 @@ export function createIpam(db) {
         ip: formatIp(row.family, value),
         role,
         locked: isLocked(role, user),
+        // Shown until someone writes their own, so a gateway is never mistaken for a free address.
+        note: role === 'gateway' ? GATEWAY_NOTE : null,
         record: record
           ? {
               hostname: record.hostname,

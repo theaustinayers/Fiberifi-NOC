@@ -163,6 +163,7 @@ The token is encrypted in the database and never sent back to the browser.
 ## How it behaves
 
 - **Reserved addresses.** Every prefix automatically has a network address, a gateway on the first usable address, and a broadcast on the last. Network and broadcast are blocked for everyone, in the API as well as the UI. Admins can edit the gateway's row and move it from the prefix's Edit dialog, and customers see it locked. IPv6 has no broadcast.
+- **Gateways.** Every gateway shows as Main Gateway - Unusable with a green status, with nothing to enter. An admin's own description replaces that text on the row.
 - **Which prefix decides.** When prefixes nest, the smallest one decides what an address is, so a `/22`'s gateway can't take a usable address from a `/31` inside it. Anything nested inside a customer's subnet is a label and reserves nothing.
 - **Drilling down.** The Prefixes page opens any range into smaller blocks, down to single addresses, and refreshes every 15 seconds. Blocks don't need to exist as prefixes. **Use block** turns one into a real prefix and can assign it.
 - **Internal space.** Choose **Internal (Fiberifi)** instead of a customer for space you use yourselves. **Release** removes the mark and keeps its records and PTRs.

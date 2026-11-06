@@ -39,8 +39,12 @@ function statusOf(row) {
   return row.rdns ? 'in_use' : 'free';
 }
 
+export function descriptionOf(row) {
+  return row.record?.description || row.note || '';
+}
+
 export function statusCell(row) {
-  if (row.role) return badge(ROLE_LABEL[row.role], 'brand');
+  if (row.role) return badge(ROLE_LABEL[row.role], 'good');
   const status = statusOf(row);
   if (status === 'free') return h('span', { class: 'muted' }, 'Free');
   return badge(STATUS[status][0], STATUS[status][1]);
@@ -73,7 +77,7 @@ export function editAddress(subnetId, row, onChange) {
   };
   const initial = {
     hostname: record.hostname ?? '',
-    status: statusOf(row),
+    status: row.role ? (record.status ?? 'in_use') : statusOf(row),
     description: record.description ?? '',
     device: record.device ?? '',
     mac: record.mac ?? '',
@@ -132,11 +136,15 @@ export function editAddress(subnetId, row, onChange) {
               label: 'Status',
               type: 'select',
               value: initial.status,
-              options: [{ value: 'free', label: 'Free' }, ...Object.entries(STATUS).map(([value, [label]]) => ({ value, label }))],
-              hint: row.record ? 'Free clears this record.' : null,
+              // A reserved address has one status, so the dialog must not offer Free for it.
+              disabled: Boolean(row.role),
+              options: row.role
+                ? [{ value: initial.status, label: ROLE_LABEL[row.role] }]
+                : [{ value: 'free', label: 'Free' }, ...Object.entries(STATUS).map(([value, [label]]) => ({ value, label }))],
+              hint: row.record && !row.role ? 'Free clears this record.' : null,
             },
           ],
-          { name: 'description', label: 'Description', value: initial.description },
+          { name: 'description', label: 'Description', value: initial.description, placeholder: row.note },
           [
             { name: 'device', label: 'Device', value: initial.device },
             { name: 'mac', label: 'MAC address', value: initial.mac, placeholder: '00:1a:2b:3c:4d:5e', mono: true },
@@ -159,6 +167,17 @@ export function editAddress(subnetId, row, onChange) {
 }
 
 function rowFor(subnetId, row, reload) {
+  if (row.locked && row.role === 'gateway') {
+    return h(
+      'tr',
+      { class: 'locked', title: 'This address cannot be edited.' },
+      h('td', { class: 'mono nowrap' }, row.ip),
+      h('td', null, h('span', { class: 'lock' }, icon('lock', 14))),
+      h('td', { class: 'break' }, descriptionOf(row)),
+      h('td', null, statusCell(row)),
+      h('td', { colSpan: 2 }, ''),
+    );
+  }
   if (row.locked) {
     return h(
       'tr',
@@ -187,7 +206,7 @@ function rowFor(subnetId, row, reload) {
       ),
     ),
     h('td', { class: 'mono' }, row.record?.hostname ?? ''),
-    h('td', { class: 'break' }, row.record?.description ?? ''),
+    h('td', { class: 'break' }, descriptionOf(row)),
     h('td', null, statusCell(row)),
     h('td', { class: 'mono nowrap' }, row.record?.mac ?? ''),
     h('td', { class: 'mono break' }, row.rdns?.hostname ?? ''),
