@@ -74,6 +74,15 @@ id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --home-dir "$DATA_DIR" --s
 install -d -m 0750 -o "$APP_USER" -g "$APP_USER" "$DATA_DIR"
 install -d -m 0755 "$APP_DIR"
 
+# Upgrades can change the database, so keep a copy from just before. The last five are kept.
+if [ -f "$DATA_DIR/noc.db" ]; then
+  say "Backing up the database"
+  systemctl stop noc-fiberifi 2>/dev/null || true
+  install -d -m 0750 -o root -g "$APP_USER" "$DATA_DIR/backups"
+  install -m 0640 -o root -g "$APP_USER" "$DATA_DIR/noc.db" "$DATA_DIR/backups/noc-$(date +%Y%m%d-%H%M%S).db"
+  ls -1t "$DATA_DIR"/backups/noc-*.db | tail -n +6 | xargs -r rm -f
+fi
+
 say "Copying the application"
 rsync -a --delete --exclude node_modules --exclude data --exclude .env --exclude .git --exclude test "$SOURCE_DIR/" "$APP_DIR/"
 chown -R root:root "$APP_DIR"

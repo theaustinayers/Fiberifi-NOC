@@ -1,5 +1,6 @@
 import { addressTable } from './addresses.js';
 import { ApiFailure, buildForm, emptyState, get, go, h, icon, meter, notice, pageHead, panel, plural, post, session, table, toast } from './lib.js';
+import { teamView } from './team.js';
 import * as admin from './views-admin.js';
 
 const app = document.getElementById('app');
@@ -125,7 +126,8 @@ async function subnetView({ id }) {
       { class: 'page-head' },
       h('div', null, h('div', { class: 'page-title' }, h('h1', { class: 'mono' }, subnet.cidr)), subnet.description && h('p', null, subnet.description)),
     ),
-    !session.rdnsEnabled && notice('Reverse DNS is not available yet. Your address records still work.', 'info'),
+    !session.user.canEdit && notice('You have read-only access. Ask your account admin if you need to make changes.', 'info'),
+    session.user.canEdit && !session.rdnsEnabled && notice('Reverse DNS is not available yet. Your address records still work.', 'info'),
     h(
       'section',
       { class: 'panel' },
@@ -137,7 +139,7 @@ async function subnetView({ id }) {
         fact('Broadcast', subnet.broadcast),
         fact('Netmask', subnet.netmask),
         fact('Usable addresses', subnet.usable, false),
-        fact('Site', subnet.site, false),
+        fact('Datacenter', subnet.datacenter?.name, false),
       ),
     ),
     h('section', { class: 'panel' }, addressTable(subnet)),
@@ -166,12 +168,14 @@ async function account() {
 const ADMIN_NAV = [
   ['/', 'Overview', 'grid'],
   ['/prefixes', 'Prefixes', 'tree'],
+  ['/datacenters', 'Datacenters', 'server'],
   ['/accounts', 'Accounts', 'users'],
   ['/audit', 'Audit log', 'list'],
   ['/settings', 'Settings', 'gear'],
 ];
 const CUSTOMER_NAV = [
   ['/subnets', 'My subnets', 'tree'],
+  ['/team', 'Team', 'users'],
   ['/account', 'Account', 'user'],
 ];
 
@@ -179,6 +183,8 @@ const ADMIN_ROUTES = [
   [/^\/$/, admin.overview, 'Overview'],
   [/^\/prefixes$/, admin.prefixes, 'Prefixes'],
   [/^\/prefixes\/(?<id>\d+)$/, admin.prefixDetail, 'Prefix'],
+  [/^\/datacenters$/, admin.datacenters, 'Datacenters'],
+  [/^\/datacenters\/(?<id>\d+)$/, admin.datacenterDetail, 'Datacenter'],
   [/^\/accounts$/, admin.accounts, 'Accounts'],
   [/^\/accounts\/(?<id>\d+)$/, admin.accountDetail, 'Account'],
   [/^\/search$/, admin.search, 'Search'],
@@ -190,6 +196,7 @@ const CUSTOMER_ROUTES = [
   [/^\/$/, mySubnets, 'My subnets'],
   [/^\/subnets$/, mySubnets, 'My subnets'],
   [/^\/subnets\/(?<id>\d+)$/, subnetView, 'Subnet'],
+  [/^\/team$/, teamView, 'Team'],
   [/^\/account$/, account, 'Account'],
 ];
 
@@ -246,7 +253,7 @@ async function renderRoute() {
 function renderShell() {
   const { user } = session;
   const isAdmin = user.role === 'admin';
-  const items = isAdmin ? ADMIN_NAV : CUSTOMER_NAV;
+  const items = isAdmin ? ADMIN_NAV : CUSTOMER_NAV.filter(([path]) => path !== '/team' || user.canManageTeam);
 
   nav = h(
     'nav',
@@ -282,7 +289,7 @@ function renderShell() {
         'div',
         null,
         h('strong', null, h('a', { href: '#/account' }, user.name)),
-        h('small', null, user.company || user.email),
+        h('small', null, user.accountName || user.email),
       ),
       h('button', { class: 'btn ghost icon', type: 'button', 'aria-label': 'Sign out', title: 'Sign out', onClick: signOut }, icon('out')),
     ),

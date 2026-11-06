@@ -18,7 +18,7 @@ import {
   toast,
 } from './lib.js';
 
-const STATUS = {
+export const STATUS = {
   in_use: ['In use', 'brand'],
   reserved: ['Reserved', 'warn'],
   dhcp: ['DHCP', ''],
@@ -29,9 +29,30 @@ function addressUrl(subnetId, ip, kind = 'addresses') {
   return `/api/subnets/${subnetId}/${kind}/${encodeURIComponent(ip)}`;
 }
 
-function editAddress(subnetId, row, onChange) {
+export function removePtrButton(subnetId, row, reload) {
+  return h(
+    'button',
+    {
+      class: 'btn sm danger',
+      type: 'button',
+      onClick: async () => {
+        await del(addressUrl(subnetId, row.ip, 'rdns'));
+        toast(`Removed the PTR for ${row.ip}`);
+        reload();
+      },
+    },
+    'Remove PTR',
+  );
+}
+
+export function editAddress(subnetId, row, onChange) {
   const record = row.record ?? {};
   const isAdmin = session.user.role === 'admin';
+  const readOnly = !session.user.canEdit;
+  const lock = (field) => {
+    if (Array.isArray(field)) return field.map(lock);
+    return field instanceof Node ? field : { ...field, disabled: field.disabled || readOnly };
+  };
   const initial = {
     hostname: record.hostname ?? '',
     status: record.status ?? 'in_use',
@@ -41,7 +62,9 @@ function editAddress(subnetId, row, onChange) {
   };
   const ptrInitial = row.rdns?.hostname ?? '';
   let ptrHint = 'Goes live in public DNS when you save. Clear it to remove the PTR.';
-  if (!session.rdnsEnabled) {
+  if (readOnly) {
+    ptrHint = '';
+  } else if (!session.rdnsEnabled) {
     ptrHint = isAdmin ? 'Add a Cloudflare API token in Settings to manage PTR records.' : 'Reverse DNS is not available yet. Contact Fiberifi support.';
   }
 
@@ -77,7 +100,8 @@ function editAddress(subnetId, row, onChange) {
   openDialog(
     (close) =>
       buildForm({
-        submitLabel: 'Save changes',
+        submitLabel: readOnly ? null : 'Save changes',
+        cancelLabel: readOnly ? 'Close' : 'Cancel',
         onCancel: close,
         fields: [
           [
@@ -105,7 +129,7 @@ function editAddress(subnetId, row, onChange) {
             disabled: !session.rdnsEnabled,
             hint: ptrHint,
           },
-        ],
+        ].map(lock),
         onSubmit: (values) => save(values, close),
       }),
     { title: row.ip, wide: true },
@@ -115,14 +139,22 @@ function editAddress(subnetId, row, onChange) {
 function rowFor(subnetId, row, reload) {
   const statusInfo = row.record ? STATUS[row.record.status] : null;
   if (row.locked) {
+    // A sync can import a PTR that breaks the usable-only rule, so admins get a way to clear it.
     return h(
       'tr',
-      { class: 'locked', title: 'Set by Fiberifi. This address cannot be edited.' },
+      { class: 'locked', title: 'Gateway and broadcast addresses cannot be edited.' },
       h('td', { class: 'mono nowrap' }, row.ip),
-      h('td', { colSpan: 5 }, h('span', { class: 'lock' }, icon('lock', 14), ROLE_LABEL[row.role])),
+      h('td', { colSpan: row.rdns ? 4 : 5 }, h('span', { class: 'lock' }, icon('lock', 14), ROLE_LABEL[row.role])),
+      row.rdns &&
+        h(
+          'td',
+          { class: 'mono break' },
+          row.rdns.hostname,
+          session.user.role === 'admin' && [' ', removePtrButton(subnetId, row, reload)],
+        ),
     );
   }
-  const free = !row.record && !row.rdns && !row.role;
+  const free = !row.record && !row.rdns;
   return h(
     'tr',
     { class: free ? 'free' : '' },
@@ -135,7 +167,7 @@ function rowFor(subnetId, row, reload) {
         row.ip,
       ),
     ),
-    h('td', { class: 'mono' }, row.record?.hostname || (row.role ? ROLE_LABEL[row.role] : '')),
+    h('td', { class: 'mono' }, row.record?.hostname ?? ''),
     h('td', { class: 'break' }, row.record?.description ?? ''),
     h('td', null, statusInfo ? badge(statusInfo[0], statusInfo[1]) : free ? h('span', { class: 'muted' }, 'Free') : ''),
     h('td', { class: 'mono nowrap' }, row.record?.mac ?? ''),
@@ -164,7 +196,7 @@ export function addressTable(subnet) {
             ],
             rows,
           )
-        : emptyState(state.q ? 'No matches' : 'No records yet', state.q ? `Nothing here matches “${state.q}”.` : 'Add an address to start keeping records.'),
+        : emptyState(state.q ? 'No matches' : 'No records yet', state.q ? `Nothing here matches “${state.q}”.` : session.user.canEdit ? 'Add an address to start keeping records.' : 'Nothing has been recorded here yet.'),
       pager(data, (page) => {
         state.page = page;
         load();
@@ -213,7 +245,7 @@ export function addressTable(subnet) {
         h('option', { value: 'used' }, 'Recorded only'),
       ),
     h('a', { class: 'btn', href: `/api/subnets/${subnet.id}/export.csv` }, icon('download', 14), 'Export CSV'),
-    h('button', { class: 'btn primary', type: 'button', onClick: addAddress }, icon('plus', 14), 'Add address'),
+    session.user.canEdit && h('button', { class: 'btn primary', type: 'button', onClick: addAddress }, icon('plus', 14), 'Add address'),
   );
 
   load().catch((error) => body.replaceChildren(emptyState('Could not load addresses', error.message)));

@@ -4,7 +4,7 @@ import { generatePassword, hashPassword } from './lib/security.js';
 
 export const DEFAULT_PREFIXES = ['2001:504:13A::/48', '2607:9340::/32', '149.112.89.0/24', '206.168.244.0/22'];
 
-const SCHEMA = `
+export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
   role TEXT NOT NULL CHECK (role IN ('admin', 'customer')),
@@ -96,10 +96,68 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS audit_ts ON audit_log (ts);
 `;
 
+// SCHEMA above is the original layout and stays frozen. Every later change is a migration, so a new install
+// and a live server upgrading always end up with the same database.
+const MIGRATIONS = [
+  // 1: customer teams, and datacenters replacing the free-text site field.
+  (db) => {
+    db.exec(`
+      ALTER TABLE users ADD COLUMN parent_id INTEGER REFERENCES users (id) ON DELETE CASCADE;
+      ALTER TABLE users ADD COLUMN access TEXT NOT NULL DEFAULT 'admin' CHECK (access IN ('admin', 'read_only'));
+      CREATE INDEX users_parent ON users (parent_id);
+
+      CREATE TABLE datacenters (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        code TEXT NOT NULL DEFAULT '',
+        address TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+
+      ALTER TABLE prefixes ADD COLUMN datacenter_id INTEGER REFERENCES datacenters (id) ON DELETE RESTRICT;
+      CREATE INDEX prefixes_datacenter ON prefixes (datacenter_id);
+    `);
+
+    // Anything already typed into Site becomes a datacenter, so no data is lost.
+    const addDatacenter = db.prepare('INSERT OR IGNORE INTO datacenters (name) VALUES (?)');
+    const findDatacenter = db.prepare('SELECT id FROM datacenters WHERE name = ?');
+    const link = db.prepare('UPDATE prefixes SET datacenter_id = ? WHERE site = ?');
+    for (const { site } of db.prepare(`SELECT DISTINCT site FROM prefixes WHERE site <> ''`).all()) {
+      addDatacenter.run(site);
+      link.run(findDatacenter.get(site).id, site);
+    }
+    db.exec('ALTER TABLE prefixes DROP COLUMN site');
+  },
+
+  // 2: which customer account each PTR belongs to, so they can all be removed when the account is deleted.
+  // No foreign key on purpose: the row has to outlive the login until Cloudflare confirms the removal.
+  (db) => {
+    db.exec(`
+      ALTER TABLE rdns_records ADD COLUMN account_id INTEGER;
+      CREATE INDEX rdns_account ON rdns_records (account_id);
+      UPDATE rdns_records SET account_id = (
+        SELECT COALESCE(u.parent_id, u.id) FROM users u WHERE u.email = rdns_records.updated_by AND u.role = 'customer'
+      );
+    `);
+  },
+];
+
+export function migrate(db) {
+  const { user_version: version } = db.prepare('PRAGMA user_version').get();
+  for (let i = version; i < MIGRATIONS.length; i += 1) {
+    transaction(db, () => {
+      MIGRATIONS[i](db);
+      db.exec(`PRAGMA user_version = ${i + 1}`);
+    });
+  }
+}
+
 export function openDatabase(path) {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 

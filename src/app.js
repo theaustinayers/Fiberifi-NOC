@@ -9,6 +9,8 @@ import { createRdns } from './rdns.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
 import { subnetRoutes } from './routes/subnets.js';
+import { teamRoutes } from './routes/team.js';
+import { createTeam } from './team.js';
 import { ApiError } from './validate.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -52,6 +54,7 @@ export function createApp(db, config) {
     config,
     ipam: createIpam(db),
     rdns: createRdns(db, config),
+    team: createTeam(db),
     cookieName: config.secureCookies ? '__Host-noc_session' : 'noc_session',
     audit(req, action, target = '', detail = '') {
       db.prepare('INSERT INTO audit_log (actor_id, actor, action, target, detail, ip) VALUES (?, ?, ?, ?, ?, ?)').run(
@@ -85,8 +88,9 @@ export function createApp(db, config) {
   });
 
   const findSession = db.prepare(
-    `SELECT u.* , s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = ? AND s.expires_at > ? AND u.disabled = 0`,
+    `SELECT u.*, s.expires_at, o.name AS owner_name, o.company AS owner_company
+     FROM sessions s JOIN users u ON u.id = s.user_id LEFT JOIN users o ON o.id = u.parent_id
+     WHERE s.token_hash = ? AND s.expires_at > ? AND u.disabled = 0 AND COALESCE(o.disabled, 0) = 0`,
   );
   const extendSession = db.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?');
   const sessionMs = config.sessionHours * 3600 * 1000;
@@ -117,6 +121,7 @@ export function createApp(db, config) {
   });
 
   app.use('/api/subnets', subnetRoutes(ctx));
+  app.use('/api/team', teamRoutes(ctx));
   app.use(
     '/api/admin',
     (req, res, next) => {

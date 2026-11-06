@@ -27,10 +27,12 @@ const ICONS = {
   out: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9',
   download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3',
   menu: 'M4 6h16M4 12h16M4 18h16',
+  chevron: 'M9 6l6 6-6 6',
   close: 'M18 6 6 18M6 6l12 12',
   alert: 'M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
   info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01',
   user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8',
+  server: 'M4 3h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM4 13h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1zM7 7h.01M7 17h.01',
 };
 
 export function icon(name, size = 16) {
@@ -279,9 +281,9 @@ export function formValues(form) {
 }
 
 // Builds a form that stays open and shows the error in place when the request fails.
-export function buildForm({ fields, submitLabel, onSubmit, danger, onCancel, extraActions, onInput }) {
+export function buildForm({ fields, submitLabel, cancelLabel = 'Cancel', onSubmit, danger, onCancel, extraActions, onInput }) {
   const note = h('div', { class: 'form-note', hidden: true });
-  const submit = h('button', { class: `btn ${danger ? 'danger-solid' : 'primary'}`, type: 'submit' }, submitLabel);
+  const submit = submitLabel ? h('button', { class: `btn ${danger ? 'danger-solid' : 'primary'}`, type: 'submit' }, submitLabel) : null;
   const rows = fields.map((f) => {
     if (f instanceof Node) return f;
     return Array.isArray(f) ? h('div', { class: 'form-row' }, f.map(control)) : control(f);
@@ -293,6 +295,7 @@ export function buildForm({ fields, submitLabel, onSubmit, danger, onCancel, ext
       novalidate: false,
       onSubmit: async (event) => {
         event.preventDefault();
+        if (!submit) return;
         clearErrors(form);
         submit.disabled = true;
         try {
@@ -311,7 +314,7 @@ export function buildForm({ fields, submitLabel, onSubmit, danger, onCancel, ext
       'div',
       { class: 'dialog-actions' },
       extraActions,
-      onCancel && h('button', { class: 'btn', type: 'button', onClick: onCancel }, 'Cancel'),
+      onCancel && h('button', { class: 'btn', type: 'button', onClick: onCancel }, cancelLabel),
       submit,
     ),
   );

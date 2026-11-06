@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { accountIdOf, canEdit, canManageTeam } from '../ipam.js';
 import {
   createLimiter,
   DUMMY_HASH,
@@ -16,6 +17,11 @@ export function publicUser(user) {
     email: user.email,
     name: user.name,
     company: user.company,
+    accountId: accountIdOf(user),
+    accountName: user.owner_company || user.owner_name || user.company || '',
+    isMember: Boolean(user.parent_id),
+    canEdit: canEdit(user),
+    canManageTeam: canManageTeam(user),
     mustChangePassword: Boolean(user.must_change_password),
   };
 }
@@ -42,7 +48,8 @@ export function authRoutes({ db, config, audit, cookieName, rdns }) {
 
     const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
     const matches = await verifyPassword(secret, user?.password_hash ?? DUMMY_HASH);
-    if (!user || !matches || user.disabled) {
+    const owner = user?.parent_id ? db.prepare('SELECT disabled FROM users WHERE id = ?').get(user.parent_id) : null;
+    if (!user || !matches || user.disabled || owner?.disabled) {
       req.auditActor = email.slice(0, 254) || 'anonymous';
       audit(req, 'auth.login_failed');
       throw new ApiError(401, 'bad_credentials', 'That email and password do not match');

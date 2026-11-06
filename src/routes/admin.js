@@ -2,9 +2,9 @@ import { Router } from 'express';
 import { generatePassword, hashPassword } from '../lib/security.js';
 import { ApiError, email as checkEmail, oneOf, positiveInt, requiredText, text, toCsv } from '../validate.js';
 
-const USER_FIELDS = `id, role, email, name, company, phone, notes, disabled, must_change_password, created_at, last_login_at`;
+const USER_FIELDS = `id, role, parent_id, access, email, name, company, phone, notes, disabled, must_change_password, created_at, last_login_at`;
 
-export function adminRoutes({ db, ipam, rdns, audit }) {
+export function adminRoutes({ db, ipam, rdns, team, audit }) {
   const router = Router();
 
   // ---- overview ----
@@ -16,7 +16,7 @@ export function adminRoutes({ db, ipam, rdns, audit }) {
       stats: {
         prefixes: prefixes.length,
         assigned: prefixes.filter((p) => p.customer).length,
-        customers: count(`SELECT COUNT(*) AS n FROM users WHERE role = 'customer'`),
+        customers: count(`SELECT COUNT(*) AS n FROM users WHERE role = 'customer' AND parent_id IS NULL`),
         addresses: count('SELECT COUNT(*) AS n FROM ip_records'),
         ptrRecords: count('SELECT COUNT(*) AS n FROM rdns_records'),
       },
@@ -25,6 +25,8 @@ export function adminRoutes({ db, ipam, rdns, audit }) {
       recent: db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 8').all(),
     });
   });
+
+  router.get('/explore', (req, res) => res.json(ipam.explore(req.query.cidr, req.query.length, req.user)));
 
   router.get('/search', (req, res) => res.json(ipam.search(text(req.query.q, { max: 100, label: 'Search' }))));
 
@@ -35,15 +37,21 @@ export function adminRoutes({ db, ipam, rdns, audit }) {
   router.get('/prefixes/export.csv', (req, res) => {
     const rows = ipam
       .listPrefixes()
-      .map((p) => [p.cidr, p.status, p.customer?.company || p.customer?.name || '', p.gateway ?? '', p.description, p.site, p.vlan ?? '']);
+      .map((p) => [p.cidr, p.status, p.customer?.company || p.customer?.name || '', p.gateway ?? '', p.description, p.datacenter?.name ?? '', p.vlan ?? '']);
     res.type('text/csv');
     res.attachment('prefixes.csv');
-    res.send(toCsv(['prefix', 'status', 'customer', 'gateway', 'description', 'site', 'vlan'], rows));
+    res.send(toCsv(['prefix', 'status', 'customer', 'gateway', 'description', 'datacenter', 'vlan'], rows));
   });
 
   router.post('/prefixes', (req, res) => {
     const prefix = ipam.createPrefix(req.body ?? {});
     audit(req, 'prefix.create', prefix.cidr);
+    res.status(201).json({ prefix });
+  });
+
+  router.post('/prefixes/carve', (req, res) => {
+    const prefix = ipam.carve(req.body ?? {});
+    audit(req, 'prefix.create', prefix.cidr, prefix.customer ? `to ${prefix.customer.company || prefix.customer.name}` : '');
     res.status(201).json({ prefix });
   });
 
@@ -135,8 +143,9 @@ export function adminRoutes({ db, ipam, rdns, audit }) {
   router.get('/users', (req, res) => {
     const users = db
       .prepare(
-        `SELECT ${USER_FIELDS}, (SELECT COUNT(*) FROM prefixes p WHERE p.customer_id = users.id) AS subnets
-         FROM users ORDER BY role DESC, company, name`,
+        `SELECT ${USER_FIELDS}, (SELECT COUNT(*) FROM prefixes p WHERE p.customer_id = users.id) AS subnets,
+           (SELECT COUNT(*) FROM users m WHERE m.parent_id = users.id) AS members
+         FROM users WHERE parent_id IS NULL ORDER BY role DESC, company, name`,
       )
       .all();
     res.json({ users });
@@ -164,12 +173,30 @@ export function adminRoutes({ db, ipam, rdns, audit }) {
   router.get('/users/:id', (req, res) => {
     const user = requireUser(req.params.id);
     const subnets = ipam.listPrefixes().filter((p) => p.customer?.id === user.id);
-    res.json({ user, subnets });
+    const isAccount = user.role === 'customer' && !user.parent_id;
+    res.json({
+      user,
+      subnets,
+      members: isAccount ? team.list(user.id).members : [],
+      owner: user.parent_id ? requireUser(user.parent_id) : null,
+      ptrCount: isAccount ? rdns.countForAccount(user.id) : 0,
+    });
+  });
+
+  router.post('/users/:id/members', async (req, res) => {
+    const { member, temporaryPassword } = await team.add(Number(req.params.id), req.body ?? {});
+    audit(req, 'team.add', member.email, member.access);
+    res.status(201).json({ member, temporaryPassword });
   });
 
   router.patch('/users/:id', (req, res) => {
     const user = requireUser(req.params.id);
     const input = req.body ?? {};
+    if (user.parent_id) {
+      const member = team.update(user.parent_id, user.id, input);
+      audit(req, 'team.update', member.email, { access: member.access, disabled: Boolean(member.disabled) });
+      return res.json({ user: requireUser(user.id) });
+    }
     const fields = profile({ ...user, ...input });
     const address = input.email === undefined ? user.email : checkEmail(input.email);
     const clash = db.prepare('SELECT 1 FROM users WHERE email = ? AND id <> ?').get(address, user.id);
@@ -179,7 +206,8 @@ export function adminRoutes({ db, ipam, rdns, audit }) {
     if (disabled && !user.disabled) {
       if (user.id === req.user.id) throw new ApiError(409, 'self', 'You cannot disable your own account');
       assertNotLastAdmin(user);
-      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+      // Includes the account's team: they lose access along with it.
+      db.prepare('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE id = ? OR parent_id = ?)').run(user.id, user.id);
     }
     db.prepare('UPDATE users SET email = ?, name = ?, company = ?, phone = ?, notes = ?, disabled = ? WHERE id = ?').run(
       address,
@@ -206,14 +234,101 @@ export function adminRoutes({ db, ipam, rdns, audit }) {
     res.json({ temporaryPassword });
   });
 
-  router.delete('/users/:id', (req, res) => {
+  router.delete('/users/:id', async (req, res) => {
     const user = requireUser(req.params.id);
     if (user.id === req.user.id) throw new ApiError(409, 'self', 'You cannot delete your own account');
     assertNotLastAdmin(user);
     const subnets = subnetCount(user.id);
-    if (subnets) throw new ApiError(409, 'has_subnets', `This account still has ${subnets} assigned subnets. Unassign them first.`);
+    if (subnets) throw new ApiError(409, 'has_subnets', `This account still has ${subnets === 1 ? '1 assigned subnet' : `${subnets} assigned subnets`}. Unassign ${subnets === 1 ? 'it' : 'them'} first.`);
+
+    // Includes PTRs from the account's team. The account stays until Cloudflare confirms every removal,
+    // because once it is gone nothing would tie the leftovers to anyone.
+    const isAccount = user.role === 'customer' && !user.parent_id;
+    const ptr = isAccount ? await rdns.removeForAccount(user.id) : { removed: 0, failed: [] };
+    if (ptr.failed.length) {
+      audit(req, 'user.delete_blocked', user.email, { ptrRemoved: ptr.removed, ptrFailed: ptr.failed });
+      throw new ApiError(
+        502,
+        'ptr_removal_failed',
+        `The account was not deleted because these PTR records could not be removed from Cloudflare: ${ptr.failed.slice(0, 5).join(', ')}. Try again.`,
+      );
+    }
     db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
-    audit(req, 'user.delete', user.email);
+    audit(req, 'user.delete', user.email, { ptrRemoved: ptr.removed });
+    res.json({ ok: true, ptrRemoved: ptr.removed });
+  });
+
+  // ---- datacenters ----
+
+  function requireDatacenter(id) {
+    const datacenter = db.prepare('SELECT * FROM datacenters WHERE id = ?').get(Number(id));
+    if (!datacenter) throw new ApiError(404, 'not_found', 'That datacenter does not exist');
+    return datacenter;
+  }
+
+  function datacenterFields(input) {
+    const name = requiredText(input.name, { max: 120, field: 'name', label: 'Name' });
+    return {
+      name,
+      code: text(input.code, { max: 20, field: 'code', label: 'Code' }),
+      address: text(input.address, { max: 300, field: 'address', label: 'Address' }),
+      notes: text(input.notes, { max: 1000, field: 'notes', label: 'Notes' }),
+    };
+  }
+
+  function assertDatacenterNameFree(name, ignoreId = 0) {
+    if (db.prepare('SELECT 1 FROM datacenters WHERE name = ? AND id <> ?').get(name, ignoreId)) {
+      throw new ApiError(409, 'duplicate', 'A datacenter with that name already exists', { field: 'name' });
+    }
+  }
+
+  router.get('/datacenters', (req, res) => {
+    const datacenters = db
+      .prepare(
+        `SELECT d.*, COUNT(p.id) AS prefixes, COUNT(p.customer_id) AS assigned
+         FROM datacenters d LEFT JOIN prefixes p ON p.datacenter_id = d.id
+         GROUP BY d.id ORDER BY d.name`,
+      )
+      .all();
+    res.json({ datacenters });
+  });
+
+  router.post('/datacenters', (req, res) => {
+    const fields = datacenterFields(req.body ?? {});
+    assertDatacenterNameFree(fields.name);
+    const { lastInsertRowid } = db
+      .prepare('INSERT INTO datacenters (name, code, address, notes) VALUES (?, ?, ?, ?)')
+      .run(fields.name, fields.code, fields.address, fields.notes);
+    audit(req, 'datacenter.create', fields.name);
+    res.status(201).json({ datacenter: requireDatacenter(lastInsertRowid) });
+  });
+
+  router.get('/datacenters/:id', (req, res) => {
+    const datacenter = requireDatacenter(req.params.id);
+    res.json({ datacenter, prefixes: ipam.listPrefixes().filter((p) => p.datacenter?.id === datacenter.id) });
+  });
+
+  router.patch('/datacenters/:id', (req, res) => {
+    const datacenter = requireDatacenter(req.params.id);
+    const fields = datacenterFields({ ...datacenter, ...req.body });
+    assertDatacenterNameFree(fields.name, datacenter.id);
+    db.prepare('UPDATE datacenters SET name = ?, code = ?, address = ?, notes = ? WHERE id = ?').run(
+      fields.name,
+      fields.code,
+      fields.address,
+      fields.notes,
+      datacenter.id,
+    );
+    audit(req, 'datacenter.update', fields.name);
+    res.json({ datacenter: requireDatacenter(datacenter.id) });
+  });
+
+  router.delete('/datacenters/:id', (req, res) => {
+    const datacenter = requireDatacenter(req.params.id);
+    const { n } = db.prepare('SELECT COUNT(*) AS n FROM prefixes WHERE datacenter_id = ?').get(datacenter.id);
+    if (n) throw new ApiError(409, 'in_use', `${n === 1 ? '1 prefix is' : `${n} prefixes are`} in this datacenter. Move ${n === 1 ? 'it' : 'them'} first.`);
+    db.prepare('DELETE FROM datacenters WHERE id = ?').run(datacenter.id);
+    audit(req, 'datacenter.delete', datacenter.name);
     res.json({ ok: true });
   });
 

@@ -1,4 +1,6 @@
 import { addressTable } from './addresses.js';
+import { explorerTable } from './explorer.js';
+import { accessBadge, memberFields } from './team.js';
 import {
   badge,
   buildForm,
@@ -114,9 +116,15 @@ export async function overview() {
 
 // ---- prefix list ----
 
-function prefixFields(prefix = {}, { withCidr = true } = {}) {
+async function datacenterOptions(emptyLabel) {
+  const { datacenters } = await get('/api/admin/datacenters');
+  const options = datacenters.map((d) => ({ value: d.id, label: d.code ? `${d.name} (${d.code})` : d.name }));
+  return [{ value: '', label: emptyLabel }, ...options];
+}
+
+function prefixFields(prefix, datacenters) {
   return [
-    withCidr && {
+    {
       name: 'cidr',
       label: 'Prefix',
       value: prefix.cidr,
@@ -127,10 +135,10 @@ function prefixFields(prefix = {}, { withCidr = true } = {}) {
     { name: 'description', label: 'Description', value: prefix.description },
     [
       { name: 'status', label: 'Status', type: 'select', value: prefix.status ?? 'active', options: statusOptions },
-      { name: 'site', label: 'Site', value: prefix.site, placeholder: 'PIT1' },
-      { name: 'vlan', label: 'VLAN', type: 'number', value: prefix.vlan, min: 1, max: 4094 },
+      { name: 'datacenterId', label: 'Datacenter', type: 'select', value: prefix.datacenter?.id ?? '', options: datacenters },
+      { name: 'vlan', label: 'VLAN (optional)', type: 'number', value: prefix.vlan, min: 1, max: 4094 },
     ],
-  ].filter(Boolean);
+  ];
 }
 
 async function addPrefix() {
@@ -138,7 +146,7 @@ async function addPrefix() {
     title: 'Add a prefix',
     intro: 'It is placed in the tree automatically, under whichever prefix contains it.',
     submitLabel: 'Add prefix',
-    fields: prefixFields({ status: 'container' }),
+    fields: prefixFields({ status: 'container' }, await datacenterOptions('None')),
     onSubmit: async (values) => (await post('/api/admin/prefixes', values)).prefix,
   });
   if (created) {
@@ -148,37 +156,40 @@ async function addPrefix() {
 }
 
 export async function prefixes() {
-  const { prefixes: all } = await get('/api/admin/prefixes');
   const state = { q: '', family: '' };
   const holder = h('div', null);
+  const load = async () => (await get('/api/admin/prefixes')).prefixes;
+  // Fetched on every refresh, so the top level and the filter see prefixes created after the page opened.
+  const aggregates = async () => (await load()).filter((p) => p.parentId === null && (!state.family || String(p.family) === state.family));
+  const explorer = explorerTable(aggregates, { datacenterOptions, customerOptions });
 
-  function render() {
+  async function render() {
     const q = state.q.toLowerCase();
-    const filtering = Boolean(q || state.family);
+    if (!q) {
+      holder.replaceChildren(explorer.view);
+      explorer.render();
+      return;
+    }
+    const all = await load();
+    if (q !== state.q.toLowerCase()) return;
     const rows = all.filter((p) => {
       if (state.family && String(p.family) !== state.family) return false;
-      if (!q) return true;
-      return [p.cidr, p.description, p.site, p.customer?.name, p.customer?.company].some((v) => v?.toLowerCase().includes(q));
+      return [p.cidr, p.description, p.datacenter?.name, p.customer?.name, p.customer?.company].some((v) => v?.toLowerCase().includes(q));
     });
     holder.replaceChildren(
       rows.length
         ? table(
-            [{ label: 'Prefix' }, { label: 'Status' }, { label: 'Customer' }, { label: 'Utilization' }, { label: 'Description' }, { label: 'Site' }, { label: 'VLAN' }],
+            [{ label: 'Prefix' }, { label: 'Status' }, { label: 'Customer' }, { label: 'Utilization' }, { label: 'Description' }, { label: 'Datacenter' }, { label: 'VLAN' }],
             rows.map((p) =>
               h(
                 'tr',
                 null,
-                h(
-                  'td',
-                  { class: 'nowrap' },
-                  h('span', { class: 'indent', style: { width: `${(filtering ? 0 : p.depth) * 18}px` } }),
-                  prefixLink(p),
-                ),
+                h('td', { class: 'nowrap' }, prefixLink(p)),
                 h('td', null, statusBadge(p)),
                 h('td', null, p.customer ? h('a', { href: `#/accounts/${p.customer.id}` }, customerName(p.customer)) : ''),
                 h('td', null, meter(p.utilization)),
                 h('td', { class: 'break' }, p.description),
-                h('td', null, p.site),
+                h('td', null, p.datacenter ? h('a', { href: `#/datacenters/${p.datacenter.id}` }, p.datacenter.name) : ''),
                 h('td', null, p.vlan ?? ''),
               ),
             ),
@@ -186,14 +197,14 @@ export async function prefixes() {
         : emptyState('No matching prefixes', 'Try a different search, or add a prefix.'),
     );
   }
-  render();
+  holder.replaceChildren(explorer.view);
 
   return h(
     'div',
     null,
     pageHead(
       'Prefixes',
-      plural(all.length, 'prefix', 'prefixes'),
+      'Open a range to drill down to single addresses. This view updates by itself.',
       [
         h('a', { class: 'btn', href: '/api/admin/prefixes/export.csv' }, icon('download', 14), 'Export CSV'),
         h('button', { class: 'btn primary', type: 'button', onClick: addPrefix }, icon('plus', 14), 'Add prefix'),
@@ -213,10 +224,10 @@ export async function prefixes() {
             type: 'search',
             placeholder: 'Filter by prefix, customer or description',
             'aria-label': 'Filter prefixes',
-            onInput: (event) => {
+            onInput: debounce((event) => {
               state.q = event.target.value.trim();
               render();
-            },
+            }),
           }),
         ),
         h(
@@ -232,6 +243,7 @@ export async function prefixes() {
           h('option', { value: '4' }, 'IPv4'),
           h('option', { value: '6' }, 'IPv6'),
         ),
+        explorer.updated,
       ),
       holder,
     ),
@@ -243,19 +255,27 @@ export async function prefixes() {
 async function allocateDialog(prefix, reload, presetLength) {
   const maxLength = prefix.family === 4 ? 32 : 128;
   const suggested = presetLength ?? Math.min(prefix.length + (prefix.family === 4 ? 5 : 16), maxLength);
+  const datacenters = await datacenterOptions('Choose a datacenter');
+  if (datacenters.length === 1) {
+    toast('Add a datacenter first.', 'warn');
+    go('/datacenters');
+    return;
+  }
   const created = await formDialog({
     title: `Allocate from ${prefix.cidr}`,
-    intro: 'Takes the first free block of the size you choose.',
+    intro: prefix.customer
+      ? `Adds a label inside ${customerName(prefix.customer)}'s subnet. It stays theirs and their addresses are not affected.`
+      : 'Takes the first free block of the size you choose.',
     submitLabel: 'Allocate subnet',
     fields: [
       [
         { name: 'length', label: 'Prefix length', type: 'number', value: suggested, min: prefix.length + 1, max: maxLength, required: true },
-        { name: 'customerId', label: 'Customer', type: 'select', value: '', options: await customerOptions('Not assigned') },
-      ],
+        !prefix.customer && { name: 'customerId', label: 'Customer', type: 'select', value: '', options: await customerOptions('Not assigned') },
+      ].filter(Boolean),
       { name: 'description', label: 'Description' },
       [
-        { name: 'site', label: 'Site', value: prefix.site },
-        { name: 'vlan', label: 'VLAN', type: 'number', min: 1, max: 4094 },
+        { name: 'datacenterId', label: 'Datacenter', type: 'select', value: prefix.datacenter?.id ?? '', options: datacenters, required: true },
+        { name: 'vlan', label: 'VLAN (optional)', type: 'number', min: 1, max: 4094 },
       ],
     ],
     onInput: async ({ length }, setNote) => {
@@ -330,7 +350,7 @@ async function splitDialog(prefix, reload) {
   const maxLength = prefix.family === 4 ? 32 : 128;
   const done = await formDialog({
     title: `Split ${prefix.cidr}`,
-    intro: 'Creates equal child prefixes and turns this prefix into a container.',
+    intro: prefix.customer ? 'Creates equal child prefixes as labels. The subnet stays assigned as it is.' : 'Creates equal child prefixes and turns this prefix into a container. Existing prefixes stay where they are.',
     submitLabel: 'Split prefix',
     fields: [{ name: 'length', label: 'New prefix length', type: 'number', value: Math.min(prefix.length + 1, maxLength), min: prefix.length + 1, max: maxLength, required: true }],
     onInput: ({ length }, setNote) => {
@@ -350,7 +370,7 @@ async function editDialog(prefix, reload) {
     title: `Edit ${prefix.cidr}`,
     submitLabel: 'Save changes',
     fields: [
-      ...prefixFields(prefix),
+      ...prefixFields(prefix, await datacenterOptions('None')),
       {
         name: 'gateway',
         label: 'Gateway',
@@ -447,9 +467,7 @@ function subnetsTab(prefix, reload) {
             h(
               'td',
               { class: 'right' },
-              f.length > prefix.length || prefix.children.length
-                ? h('button', { class: 'btn sm', type: 'button', onClick: () => allocateDialog(prefix, reload, Math.max(f.length, prefix.length + 1)) }, 'Allocate')
-                : '',
+              h('button', { class: 'btn sm', type: 'button', onClick: () => allocateDialog(prefix, reload, Math.max(f.length, prefix.length + 1)) }, 'Allocate'),
             ),
           ),
         ),
@@ -517,8 +535,8 @@ export async function prefixDetail({ id }, { reload }) {
         prefix.customer
           ? h('button', { class: 'btn', type: 'button', onClick: () => unassignDialog(prefix, reload) }, 'Unassign')
           : h('button', { class: 'btn', type: 'button', onClick: () => assignDialog(prefix, reload) }, 'Assign to customer'),
-        !isSingle && !prefix.customer && h('button', { class: 'btn primary', type: 'button', onClick: () => allocateDialog(prefix, reload) }, 'Allocate subnet'),
-        !isSingle && !prefix.customer && !prefix.children.length && h('button', { class: 'btn', type: 'button', onClick: () => splitDialog(prefix, reload) }, 'Split'),
+        !isSingle && h('button', { class: 'btn primary', type: 'button', onClick: () => allocateDialog(prefix, reload) }, 'Allocate subnet'),
+        !isSingle && h('button', { class: 'btn', type: 'button', onClick: () => splitDialog(prefix, reload) }, 'Split'),
         h('button', { class: 'btn', type: 'button', onClick: () => editDialog(prefix, reload) }, 'Edit'),
         h('button', { class: 'btn danger', type: 'button', onClick: () => deleteDialog(prefix) }, 'Delete'),
       ),
@@ -536,7 +554,7 @@ export async function prefixDetail({ id }, { reload }) {
         fact('Broadcast', prefix.broadcast),
         fact('Size', prefix.size, false),
         fact('Allocated', prefix.utilization.pct === null ? null : meter(prefix.utilization), false),
-        fact('Site', prefix.site, false),
+        fact('Datacenter', prefix.datacenter ? h('a', { href: `#/datacenters/${prefix.datacenter.id}` }, prefix.datacenter.name) : null, false),
         fact('VLAN', prefix.vlan, false),
         fact('Reverse zone', prefix.reverseZones.length === 1 ? prefix.reverseZones[0] : `${prefix.reverseZones[0]} + ${prefix.reverseZones.length - 1} more`),
       ),
@@ -602,7 +620,7 @@ export async function accounts() {
       'section',
       { class: 'panel' },
       table(
-        [{ label: 'Name' }, { label: 'Email' }, { label: 'Type' }, { label: 'Subnets' }, { label: 'Last sign-in' }],
+        [{ label: 'Name' }, { label: 'Email' }, { label: 'Type' }, { label: 'Subnets' }, { label: 'Team' }, { label: 'Last sign-in' }],
         users.map((u) =>
           h(
             'tr',
@@ -611,6 +629,7 @@ export async function accounts() {
             h('td', { class: 'break' }, u.email),
             h('td', null, u.disabled ? badge('Disabled', 'bad') : badge(u.role === 'admin' ? 'Admin' : 'Customer', u.role === 'admin' ? 'brand' : '')),
             h('td', null, u.role === 'customer' ? u.subnets : ''),
+            h('td', null, u.role === 'customer' ? u.members : ''),
             h('td', { class: 'nowrap muted' }, when(u.last_login_at)),
           ),
         ),
@@ -620,11 +639,12 @@ export async function accounts() {
 }
 
 export async function accountDetail({ id }, { reload }) {
-  const { user, subnets } = await get(`/api/admin/users/${id}`);
+  const { user, subnets, members, owner, ptrCount } = await get(`/api/admin/users/${id}`);
   const isSelf = user.id === session.user.id;
 
   const edit = async () => {
-    if (await formDialog({ title: `Edit ${user.name}`, submitLabel: 'Save changes', fields: accountFields(user), onSubmit: (values) => patch(`/api/admin/users/${id}`, values) })) {
+    const fields = owner ? memberFields(user) : accountFields(user);
+    if (await formDialog({ title: `Edit ${user.name}`, submitLabel: 'Save changes', fields, onSubmit: (values) => patch(`/api/admin/users/${id}`, values) })) {
       toast('Saved');
       reload();
     }
@@ -642,7 +662,9 @@ export async function accountDetail({ id }, { reload }) {
     const disabling = !user.disabled;
     const done = await confirmDialog({
       title: disabling ? `Disable ${user.name}?` : `Enable ${user.name}?`,
-      body: disabling ? 'They are signed out straight away and cannot sign in. Their subnets and records stay as they are.' : 'They will be able to sign in again.',
+      body: disabling
+        ? `They are signed out straight away and cannot sign in.${members.length ? ` ${plural(members.length, 'team member')} also lose access.` : ''} Subnets and records stay as they are.`
+        : 'They will be able to sign in again.',
       confirmLabel: disabling ? 'Disable account' : 'Enable account',
       danger: disabling,
       onConfirm: () => patch(`/api/admin/users/${id}`, { disabled: disabling }),
@@ -651,14 +673,32 @@ export async function accountDetail({ id }, { reload }) {
   };
   const remove = async () => {
     const done = await confirmDialog({
-      title: `Delete ${user.name}?`,
-      body: 'This cannot be undone. The audit log keeps its history.',
+      title: `Delete ${user.company || user.name}?`,
+      body: [
+        members.length ? `Their ${plural(members.length, 'team member')} will be deleted too.` : '',
+        ptrCount ? `${plural(ptrCount, 'PTR record')} they created will be removed from Cloudflare.` : '',
+        'This cannot be undone. The audit log keeps its history.',
+      ]
+        .filter(Boolean)
+        .join(' '),
       confirmLabel: 'Delete account',
       onConfirm: () => del(`/api/admin/users/${id}`),
     });
     if (done) {
       toast('Account deleted');
-      go('/accounts');
+      go(owner ? `/accounts/${owner.id}` : '/accounts');
+    }
+  };
+  const addMember = async () => {
+    const created = await formDialog({
+      title: `Add a team member to ${user.company || user.name}`,
+      submitLabel: 'Add member',
+      fields: memberFields(),
+      onSubmit: (values) => post(`/api/admin/users/${id}/members`, values),
+    });
+    if (created) {
+      await secretDialog({ title: 'Team member added', intro: `Send this temporary password to ${created.member.email} over a secure channel.`, secret: created.temporaryPassword });
+      reload();
     }
   };
 
@@ -667,14 +707,24 @@ export async function accountDetail({ id }, { reload }) {
   return h(
     'div',
     null,
-    h('div', { class: 'crumbs' }, h('a', { href: '#/accounts' }, 'Accounts')),
+    h(
+      'div',
+      { class: 'crumbs' },
+      h('a', { href: '#/accounts' }, 'Accounts'),
+      owner && [h('span', null, '/'), h('a', { href: `#/accounts/${owner.id}` }, owner.company || owner.name)],
+    ),
     h(
       'div',
       { class: 'page-head' },
       h(
         'div',
         null,
-        h('div', { class: 'page-title' }, h('h1', null, user.company || user.name), user.disabled ? badge('Disabled', 'bad') : badge(user.role === 'admin' ? 'Admin' : 'Customer', user.role === 'admin' ? 'brand' : '')),
+        h(
+          'div',
+          { class: 'page-title' },
+          h('h1', null, user.company || user.name),
+          owner ? accessBadge(user) : user.disabled ? badge('Disabled', 'bad') : badge(user.role === 'admin' ? 'Admin' : 'Customer', user.role === 'admin' ? 'brand' : ''),
+        ),
         h('p', null, user.email),
       ),
       h(
@@ -700,6 +750,28 @@ export async function accountDetail({ id }, { reload }) {
       ),
     ),
     user.role === 'customer' &&
+      !owner &&
+      panel(
+        'Team',
+        members.length
+          ? table(
+              [{ label: 'Name' }, { label: 'Email' }, { label: 'Access' }, { label: 'Last sign-in' }],
+              members.map((m) =>
+                h(
+                  'tr',
+                  null,
+                  h('td', null, h('a', { href: `#/accounts/${m.id}` }, m.name)),
+                  h('td', { class: 'break' }, m.email),
+                  h('td', null, accessBadge(m)),
+                  h('td', { class: 'nowrap muted' }, when(m.last_login_at)),
+                ),
+              ),
+            )
+          : emptyState('No team members', 'Only the account owner can sign in.'),
+        h('button', { class: 'btn sm', type: 'button', onClick: addMember }, 'Add member'),
+      ),
+    user.role === 'customer' &&
+      !owner &&
       panel(
         'Assigned subnets',
         subnets.length
@@ -719,6 +791,131 @@ export async function accountDetail({ id }, { reload }) {
             )
           : emptyState('No subnets assigned', 'Open a prefix and choose Assign to customer.', h('a', { class: 'btn', href: '#/prefixes' }, 'Go to prefixes')),
       ),
+  );
+}
+
+// ---- datacenters ----
+
+function datacenterFields(datacenter = {}) {
+  return [
+    [
+      { name: 'name', label: 'Name', value: datacenter.name, required: true, placeholder: 'Pittsburgh 1' },
+      { name: 'code', label: 'Code (optional)', value: datacenter.code, placeholder: 'PIT1' },
+    ],
+    { name: 'address', label: 'Address (optional)', value: datacenter.address },
+    { name: 'notes', label: 'Notes (optional)', type: 'textarea', value: datacenter.notes },
+  ];
+}
+
+export async function datacenters() {
+  const { datacenters: all } = await get('/api/admin/datacenters');
+
+  const add = async () => {
+    const created = await formDialog({
+      title: 'Add a datacenter',
+      submitLabel: 'Add datacenter',
+      fields: datacenterFields(),
+      onSubmit: (values) => post('/api/admin/datacenters', values),
+    });
+    if (created) {
+      toast(`Added ${created.datacenter.name}`);
+      go(`/datacenters/${created.datacenter.id}`);
+    }
+  };
+  const addButton = h('button', { class: 'btn primary', type: 'button', onClick: add }, icon('plus', 14), 'Add datacenter');
+
+  return h(
+    'div',
+    null,
+    pageHead('Datacenters', all.length ? plural(all.length, 'datacenter') : 'Where your prefixes are deployed.', [addButton]),
+    h(
+      'section',
+      { class: 'panel' },
+      all.length
+        ? table(
+            [{ label: 'Name' }, { label: 'Code' }, { label: 'Address' }, { label: 'Prefixes' }, { label: 'Assigned' }],
+            all.map((d) =>
+              h(
+                'tr',
+                null,
+                h('td', null, h('a', { href: `#/datacenters/${d.id}` }, d.name)),
+                h('td', { class: 'mono' }, d.code),
+                h('td', { class: 'break' }, d.address),
+                h('td', null, d.prefixes),
+                h('td', null, d.assigned),
+              ),
+            ),
+          )
+        : emptyState('No datacenters yet', 'Add one before you allocate subnets.'),
+    ),
+  );
+}
+
+export async function datacenterDetail({ id }, { reload }) {
+  const { datacenter, prefixes: list } = await get(`/api/admin/datacenters/${id}`);
+
+  const edit = async () => {
+    const done = await formDialog({
+      title: `Edit ${datacenter.name}`,
+      submitLabel: 'Save changes',
+      fields: datacenterFields(datacenter),
+      onSubmit: (values) => patch(`/api/admin/datacenters/${id}`, values),
+    });
+    if (done) {
+      toast('Saved');
+      reload();
+    }
+  };
+  const remove = async () => {
+    const done = await confirmDialog({
+      title: `Delete ${datacenter.name}?`,
+      body: 'This cannot be undone.',
+      confirmLabel: 'Delete datacenter',
+      onConfirm: () => del(`/api/admin/datacenters/${id}`),
+    });
+    if (done) {
+      toast(`Deleted ${datacenter.name}`);
+      go('/datacenters');
+    }
+  };
+  const fact = (label, value) => (value ? h('div', null, h('dt', null, label), h('dd', null, value)) : null);
+
+  return h(
+    'div',
+    null,
+    h('div', { class: 'crumbs' }, h('a', { href: '#/datacenters' }, 'Datacenters')),
+    h(
+      'div',
+      { class: 'page-head' },
+      h('div', null, h('div', { class: 'page-title' }, h('h1', null, datacenter.name), datacenter.code && badge(datacenter.code))),
+      h(
+        'div',
+        { class: 'actions' },
+        h('button', { class: 'btn', type: 'button', onClick: edit }, 'Edit'),
+        h('button', { class: 'btn danger', type: 'button', onClick: remove }, 'Delete'),
+      ),
+    ),
+    (datacenter.address || datacenter.notes) &&
+      h('section', { class: 'panel' }, h('dl', { class: 'facts' }, fact('Address', datacenter.address), fact('Notes', datacenter.notes))),
+    panel(
+      'Prefixes',
+      list.length
+        ? table(
+            [{ label: 'Prefix' }, { label: 'Status' }, { label: 'Customer' }, { label: 'VLAN' }, { label: 'Description' }],
+            list.map((p) =>
+              h(
+                'tr',
+                null,
+                h('td', { class: 'nowrap' }, prefixLink(p)),
+                h('td', null, statusBadge(p)),
+                h('td', null, p.customer ? h('a', { href: `#/accounts/${p.customer.id}` }, customerName(p.customer)) : ''),
+                h('td', null, p.vlan ?? ''),
+                h('td', { class: 'break' }, p.description),
+              ),
+            ),
+          )
+        : emptyState('No prefixes here yet', 'Choose this datacenter when you allocate or edit a prefix.'),
+    ),
   );
 }
 

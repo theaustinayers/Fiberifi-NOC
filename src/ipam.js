@@ -25,10 +25,14 @@ export const PREFIX_STATUSES = ['container', 'active', 'reserved', 'deprecated']
 export const RECORD_STATUSES = ['in_use', 'reserved', 'dhcp'];
 const PAGE_SIZE = 256;
 const MAX_SPLIT = 256;
+const MAX_EXPLORE_BITS = 8; // 256 rows per level
 
 const SELECT_PREFIX = `
-  SELECT p.*, u.name AS customer_name, u.company AS customer_company, u.email AS customer_email
-  FROM prefixes p LEFT JOIN users u ON u.id = p.customer_id`;
+  SELECT p.*, u.name AS customer_name, u.company AS customer_company, u.email AS customer_email,
+    d.name AS datacenter_name, d.code AS datacenter_code
+  FROM prefixes p
+  LEFT JOIN users u ON u.id = p.customer_id
+  LEFT JOIN datacenters d ON d.id = p.datacenter_id`;
 
 function bounds(row) {
   return { family: row.family, length: row.length, network: fromHex(row.start_hex), last: fromHex(row.end_hex) };
@@ -40,10 +44,23 @@ function rolesOf(row) {
   return subnetRoles({ ...bounds(row), gateway });
 }
 
-// Network and broadcast are never editable. The gateway belongs to Fiberifi: admins can document it, customers cannot.
-export function isLocked(role, user) {
-  if (role === 'network' || role === 'broadcast') return true;
-  return role === 'gateway' && user.role !== 'admin';
+// A sub-user acts on behalf of the customer account above them.
+export function accountIdOf(user) {
+  return user.parent_id ?? user.id;
+}
+
+export function canEdit(user) {
+  return user.role === 'admin' || !user.parent_id || user.access === 'admin';
+}
+
+export function canManageTeam(user) {
+  return user.role === 'customer' && canEdit(user);
+}
+
+// Reserved addresses are configuration, not records, so nobody edits them directly, admins included.
+// An admin changes the gateway through the prefix itself.
+export function isLocked(role) {
+  return Boolean(role);
 }
 
 function likePattern(q) {
@@ -67,6 +84,7 @@ export function createIpam(db) {
     covering: db.prepare(
       'SELECT * FROM prefixes WHERE family = ? AND start_hex <= ? AND end_hex >= ? ORDER BY length DESC',
     ),
+    withinFull: db.prepare(`${SELECT_PREFIX} WHERE p.family = ? AND p.start_hex >= ? AND p.end_hex <= ? ORDER BY p.start_hex, p.length`),
     within: db.prepare(
       'SELECT * FROM prefixes WHERE family = ? AND start_hex >= ? AND end_hex <= ? ORDER BY start_hex, length',
     ),
@@ -77,7 +95,7 @@ export function createIpam(db) {
     ),
     countRecords: db.prepare('SELECT COUNT(*) AS n FROM ip_records WHERE family = ? AND ip_hex BETWEEN ? AND ?'),
     countRdns: db.prepare('SELECT COUNT(*) AS n FROM rdns_records WHERE family = ? AND ip_hex BETWEEN ? AND ?'),
-    customer: db.prepare(`SELECT id, name, company, disabled FROM users WHERE id = ? AND role = 'customer'`),
+    customer: db.prepare(`SELECT id, name, company, disabled FROM users WHERE id = ? AND role = 'customer' AND parent_id IS NULL`),
   };
 
   function requirePrefix(id) {
@@ -89,7 +107,7 @@ export function createIpam(db) {
   // Customers get a 404, not a 403, so subnet ids cannot be probed.
   function prefixForUser(id, user) {
     const row = q.byId.get(Number(id));
-    if (!row || (user.role !== 'admin' && row.customer_id !== user.id)) {
+    if (!row || (user.role !== 'admin' && row.customer_id !== accountIdOf(user))) {
       throw new ApiError(404, 'not_found', 'That subnet does not exist');
     }
     return row;
@@ -163,7 +181,7 @@ export function createIpam(db) {
       length: row.length,
       status: row.status,
       description: row.description,
-      site: row.site,
+      datacenter: row.datacenter_id ? { id: row.datacenter_id, name: row.datacenter_name, code: row.datacenter_code } : null,
       vlan: row.vlan,
       parentId: row.parent_id ?? null,
       depth: row.depth ?? 0,
@@ -259,7 +277,25 @@ export function createIpam(db) {
     if (ip.value === defaults.network || ip.value === defaults.broadcast) {
       throw invalid('The gateway cannot be the network or broadcast address', 'gateway');
     }
-    return formatIp(ip.family, ip.value);
+    const gateway = formatIp(ip.family, ip.value);
+    if (gateway !== row.gateway && ptrAt(ip.family, ip.value)) {
+      throw invalid(`${gateway} has a PTR record, and gateways cannot have one. Remove it first.`, 'gateway');
+    }
+    return gateway;
+  }
+
+  function ptrAt(family, value) {
+    return db.prepare('SELECT hostname FROM rdns_records WHERE family = ? AND ip_hex = ?').get(family, toHex(value));
+  }
+
+  // PTRs are for usable addresses only, so a subnet cannot be handed over with one on a reserved address.
+  function assertNoPtrOnReserved(row) {
+    for (const [role, value] of Object.entries(rolesOf(row))) {
+      if (value !== null && ptrAt(row.family, value)) {
+        const ip = formatIp(row.family, value);
+        throw new ApiError(409, 'ptr_on_reserved', `${ip} would be the ${role} address but has a PTR record. Remove it first.`);
+      }
+    }
   }
 
   function requireCustomer(id) {
@@ -272,7 +308,7 @@ export function createIpam(db) {
   function insertPrefix(p, fields) {
     const result = db
       .prepare(
-        `INSERT INTO prefixes (family, cidr, length, start_hex, end_hex, status, description, site, vlan)
+        `INSERT INTO prefixes (family, cidr, length, start_hex, end_hex, status, description, datacenter_id, vlan)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
@@ -283,16 +319,23 @@ export function createIpam(db) {
         toHex(p.last),
         fields.status,
         fields.description,
-        fields.site,
+        fields.datacenter_id,
         fields.vlan,
       );
     return Number(result.lastInsertRowid);
   }
 
+  function datacenterId(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const found = db.prepare('SELECT id FROM datacenters WHERE id = ?').get(Number(value));
+    if (!found) throw invalid('Choose a datacenter from the list', 'datacenterId');
+    return found.id;
+  }
+
   function prefixFields(input) {
     return {
       description: text(input.description, { max: 200, field: 'description', label: 'Description' }),
-      site: text(input.site, { max: 80, field: 'site', label: 'Site' }),
+      datacenter_id: datacenterId('datacenterId' in input ? input.datacenterId : input.datacenter_id),
       vlan: vlan(input.vlan),
     };
   }
@@ -302,13 +345,21 @@ export function createIpam(db) {
     if (existing) throw new ApiError(409, 'duplicate', `${cidr} already exists`, { field: 'cidr' });
   }
 
+  // Prefixes may nest freely, but one that overlaps an assigned subnet is only a label. If it were active,
+  // its own network and gateway would lock addresses the customer is entitled to use.
+  function statusFor(p, wanted) {
+    const start = toHex(p.network);
+    const end = toHex(p.last);
+    return q.assignedOverlap.get(p.family, 0, end, start) ? 'container' : wanted;
+  }
+
   function createPrefix(input) {
     const p = asApiError(() => parseCidr(input.cidr));
     assertUnique(p.cidr);
     const fields = prefixFields(input);
     const hasParent = q.covering.all(p.family, toHex(p.network), toHex(p.last)).length > 0;
     const status = input.status ? oneOf(input.status, PREFIX_STATUSES, 'status') : hasParent ? 'active' : 'container';
-    return getPrefix(insertPrefix(p, { ...fields, status }));
+    return getPrefix(insertPrefix(p, { ...fields, status: statusFor(p, status) }));
   }
 
   function updatePrefix(id, input) {
@@ -317,6 +368,9 @@ export function createIpam(db) {
     const status = input.status === undefined ? row.status : oneOf(input.status, PREFIX_STATUSES, 'status');
     if (row.customer_id && status === 'container') {
       throw invalid('An assigned subnet cannot be a container', 'status');
+    }
+    if (!row.customer_id && status !== 'container' && q.assignedOverlap.get(row.family, row.id, row.end_hex, row.start_hex)) {
+      throw invalid('A prefix that overlaps an assigned subnet has to stay a container', 'status');
     }
 
     let next = bounds(row);
@@ -337,9 +391,9 @@ export function createIpam(db) {
     if (gateway && input.gateway === undefined && !contains(next, parseIp(gateway).value)) gateway = null;
 
     db.prepare(
-      `UPDATE prefixes SET cidr = ?, length = ?, start_hex = ?, end_hex = ?, status = ?, description = ?, site = ?,
+      `UPDATE prefixes SET cidr = ?, length = ?, start_hex = ?, end_hex = ?, status = ?, description = ?, datacenter_id = ?,
        vlan = ?, gateway = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-    ).run(cidr, moved.length, moved.start_hex, moved.end_hex, status, fields.description, fields.site, fields.vlan, gateway, row.id);
+    ).run(cidr, moved.length, moved.start_hex, moved.end_hex, status, fields.description, fields.datacenter_id, fields.vlan, gateway, row.id);
     return getPrefix(row.id);
   }
 
@@ -377,11 +431,13 @@ export function createIpam(db) {
       }
       assertNoAssignedOverlap(row.family, row.id, row.start_hex, row.end_hex);
       const active = { ...row, status: row.status === 'container' ? 'active' : row.status };
+      const gatewayAddress = cleanGateway(gateway, active);
+      assertNoPtrOnReserved({ ...active, gateway: gatewayAddress });
       db.prepare(
         `UPDATE prefixes SET customer_id = ?, gateway = ?, status = ?,
          assigned_at = COALESCE(assigned_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-      ).run(customer.id, cleanGateway(gateway, active), active.status, row.id);
+      ).run(customer.id, gatewayAddress, active.status, row.id);
       return { prefix: getPrefix(row.id), customer };
     });
   }
@@ -424,11 +480,37 @@ export function createIpam(db) {
       const next = nextAvailable(bounds(row), directChildren(row).map(bounds), n);
       if (!next) throw new ApiError(409, 'no_space', `No free /${n} left in ${row.cidr}`, { field: 'length' });
       const fields = prefixFields(input);
+      if (!fields.datacenter_id) throw invalid('Choose a datacenter', 'datacenterId');
       const status = input.status ? oneOf(input.status, PREFIX_STATUSES, 'status') : 'active';
       const customerId = input.customerId ? requireCustomer(input.customerId).id : null;
       if (customerId) assertNoAssignedOverlap(next.family, 0, toHex(next.network), toHex(next.last));
-      const newId = insertPrefix(next, { ...fields, status: customerId && status === 'container' ? 'active' : status });
+      const newStatus = customerId ? (status === 'container' ? 'active' : status) : statusFor(next, status);
+      const newId = insertPrefix(next, { ...fields, status: newStatus });
       if (customerId) {
+        assertNoPtrOnReserved(q.byId.get(newId));
+        db.prepare(
+          `UPDATE prefixes SET customer_id = ?, assigned_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
+        ).run(customerId, newId);
+      }
+      return getPrefix(newId);
+    });
+  }
+
+  // Makes a real prefix out of any block, inside any prefix, and optionally assigns it.
+  function carve(input) {
+    return transaction(db, () => {
+      const p = asApiError(() => parseCidr(input.cidr));
+      const start = toHex(p.network);
+      const end = toHex(p.last);
+      assertUnique(p.cidr);
+      if (!q.covering.all(p.family, start, end).length) throw invalid(`${p.cidr} is not inside any of your prefixes`, 'cidr');
+      const fields = prefixFields(input);
+      if (!fields.datacenter_id) throw invalid('Choose a datacenter', 'datacenterId');
+      const customerId = input.customerId ? requireCustomer(input.customerId).id : null;
+      if (customerId) assertNoAssignedOverlap(p.family, 0, start, end);
+      const newId = insertPrefix(p, { ...fields, status: customerId ? 'active' : statusFor(p, 'active') });
+      if (customerId) {
+        assertNoPtrOnReserved(q.byId.get(newId));
         db.prepare(
           `UPDATE prefixes SET customer_id = ?, assigned_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
         ).run(customerId, newId);
@@ -441,18 +523,17 @@ export function createIpam(db) {
     return transaction(db, () => {
       const row = requirePrefix(id);
       const n = checkChildLength(row, length);
-      if (row.customer_id) throw new ApiError(409, 'assigned', 'Unassign this subnet before splitting it');
-      if (directChildren(row).length) {
-        throw new ApiError(409, 'has_children', 'This prefix already has child prefixes. Allocate from its free space instead.');
-      }
       const count = 1 << Math.min(n - row.length, 30);
       if (count > MAX_SPLIT) throw invalid(`That would create ${count.toLocaleString('en-US')} prefixes. The limit is ${MAX_SPLIT}.`, 'length');
       const stride = prefixSize(row.family, n);
       const start = fromHex(row.start_hex);
+      const exists = db.prepare('SELECT 1 FROM prefixes WHERE cidr = ?');
       for (let i = 0n; i < BigInt(count); i += 1n) {
-        insertPrefix(makePrefix(row.family, start + i * stride, n), { status: 'active', description: '', site: row.site, vlan: null });
+        const block = makePrefix(row.family, start + i * stride, n);
+        if (exists.get(block.cidr)) continue;
+        insertPrefix(block, { status: statusFor(block, 'active'), description: '', datacenter_id: row.datacenter_id, vlan: null });
       }
-      db.prepare(`UPDATE prefixes SET status = 'container', gateway = NULL WHERE id = ?`).run(row.id);
+      if (!row.customer_id) db.prepare(`UPDATE prefixes SET status = 'container', gateway = NULL WHERE id = ?`).run(row.id);
       return getPrefix(row.id);
     });
   }
@@ -511,8 +592,7 @@ export function createIpam(db) {
     return null;
   }
 
-  function listAddresses(row, user, { page = 0, view = 'all', search = '' }) {
-    const b = bounds(row);
+  function addressRowBuilder(row, user) {
     const roles = rolesInRange(row);
     const records = db.prepare('SELECT * FROM ip_records WHERE family = ? AND ip_hex = ?');
     const rdns = db.prepare('SELECT hostname, ttl, updated_at FROM rdns_records WHERE family = ? AND ip_hex = ?');
@@ -525,7 +605,7 @@ export function createIpam(db) {
       return {
         ip: formatIp(row.family, value),
         role,
-        locked: isLocked(role, user),
+        locked: isLocked(role),
         record: record
           ? {
               hostname: record.hostname,
@@ -540,6 +620,87 @@ export function createIpam(db) {
         rdns: ptr ? { hostname: ptr.hostname, ttl: ptr.ttl, updatedAt: ptr.updated_at } : null,
       };
     };
+    return toRow;
+  }
+
+  function defaultStep({ family, length }) {
+    if (family === 4 && length < 24) return Math.min(24, length + 8);
+    return Math.min(BITS[family], length + 4);
+  }
+
+  // One level of the drill-down. Blocks are computed from the live prefix table, so they need not exist as prefixes.
+  function explore(cidrText, lengthValue, user) {
+    const p = asApiError(() => parseCidr(cidrText));
+    const start = toHex(p.network);
+    const end = toHex(p.last);
+    const bits = BITS[p.family];
+    if (p.length === bits) throw invalid('A single address cannot be opened any further', 'cidr');
+    const covering = q.covering.all(p.family, start, end);
+    if (!covering.length) throw new ApiError(404, 'not_found', `${p.cidr} is not inside any of your prefixes`);
+
+    const options = [];
+    for (let n = p.length + 1; n <= Math.min(bits, p.length + MAX_EXPLORE_BITS); n += 1) options.push(n);
+    const length = lengthValue === undefined || lengthValue === '' ? defaultStep(p) : Number(lengthValue);
+    if (!options.includes(length)) throw invalid(`Choose a size from /${options[0]} to /${options.at(-1)}`, 'length');
+
+    const nearby = q.withinFull.all(p.family, start, end);
+    const ancestors = covering.map((r) => q.byId.get(r.id));
+    const known = [...ancestors, ...nearby.filter((r) => !ancestors.some((a) => a.id === r.id))];
+    const smallestCovering = (from, to) =>
+      known.filter((r) => r.start_hex <= from && r.end_hex >= to).sort((a, b) => b.length - a.length);
+    const customerOf = (r) => ({ id: r.customer_id, name: r.customer_name, company: r.customer_company });
+
+    const size = prefixSize(p.family, length);
+    const count = 1 << (length - p.length);
+    const blocks = [];
+    for (let i = 0; i < count; i += 1) blocks.push(makePrefix(p.family, p.network + BigInt(i) * size, length));
+
+    if (length === bits) {
+      const toRow = addressRowBuilder({ family: p.family, start_hex: start, end_hex: end }, user);
+      const rows = blocks.map((block) => {
+        const hex = toHex(block.network);
+        const over = smallestCovering(hex, hex);
+        const owner = over.find((r) => r.customer_id);
+        return { ...toRow(hex), prefixId: over[0].id, customer: owner ? customerOf(owner) : null };
+      });
+      return { cidr: p.cidr, length, options, kind: 'addresses', rows };
+    }
+
+    const rows = blocks.map((block) => {
+      const from = toHex(block.network);
+      const to = toHex(block.last);
+      const over = smallestCovering(from, to);
+      const exact = over.find((r) => r.cidr === block.cidr);
+      const owner = over.find((r) => r.customer_id);
+      const within = known.filter((r) => r.start_hex >= from && r.end_hex <= to && r.length > length);
+      const assignedWithin = within.filter((r) => r.customer_id);
+      const customersInside = [...new Map(assignedWithin.map((r) => [r.customer_id, customerOf(r)])).values()].slice(0, 3);
+      const inUse = within.length > 0 || over.some((r) => r.status !== 'container');
+      let state = 'free';
+      if (owner) state = 'assigned';
+      else if (assignedWithin.length) state = 'partial';
+      else if (inUse) state = 'internal';
+      return {
+        cidr: block.cidr,
+        length,
+        state,
+        prefixId: exact?.id ?? null,
+        customer: owner ? customerOf(owner) : null,
+        customersInside,
+        description: exact?.description ?? '',
+        datacenter: over.find((r) => r.datacenter_name)?.datacenter_name ?? null,
+        datacenterId: over.find((r) => r.datacenter_id)?.datacenter_id ?? null,
+        vlan: exact?.vlan ?? null,
+        records: q.countRecords.get(p.family, from, to).n,
+        ptrs: q.countRdns.get(p.family, from, to).n,
+      };
+    });
+    return { cidr: p.cidr, length, options, kind: 'blocks', rows };
+  }
+
+  function listAddresses(row, user, { page = 0, view = 'all', search = '' }) {
+    const b = bounds(row);
+    const toRow = addressRowBuilder(row, user);
 
     const dense = row.family === 4 && view !== 'used' && !search;
     if (dense) {
@@ -575,8 +736,11 @@ export function createIpam(db) {
     return { rows: hexes.map(toRow), page, pageSize: PAGE_SIZE, total, dense };
   }
 
-  // Resolves an address inside a subnet and refuses it if this user may not touch it.
-  function editableAddress(row, ipText, user) {
+  function assertCanEdit(user) {
+    if (!canEdit(user)) throw new ApiError(403, 'read_only', 'You have read-only access to this account');
+  }
+
+  function resolveAddress(row, ipText) {
     let ip;
     try {
       ip = parseIp(ipText);
@@ -586,11 +750,30 @@ export function createIpam(db) {
     if (ip.family !== row.family || !contains(bounds(row), ip.value)) {
       throw invalid(`${ipText} is not inside ${row.cidr}`, 'ip');
     }
-    const role = roleAt(ip.family, ip.value);
-    if (isLocked(role, user)) {
-      throw new ApiError(403, 'locked', `The ${role} address is managed by Fiberifi and cannot be changed`);
-    }
     return { ...ip, text: formatIp(ip.family, ip.value), hex: toHex(ip.value) };
+  }
+
+  // Resolves an address inside a subnet and refuses it if this user may not touch it.
+  function editableAddress(row, ipText, user) {
+    assertCanEdit(user);
+    const ip = resolveAddress(row, ipText);
+    const role = roleAt(ip.family, ip.value);
+    if (isLocked(role)) {
+      throw new ApiError(403, 'locked', `The ${role} address cannot be edited`);
+    }
+    return ip;
+  }
+
+  // Stricter than editableAddress: nobody, admins included, can publish a PTR on a reserved address.
+  // Admins can still remove one, because a sync can import a PTR that was already there.
+  function ptrAddress(row, ipText, user, { removing = false } = {}) {
+    assertCanEdit(user);
+    const ip = resolveAddress(row, ipText);
+    const role = roleAt(ip.family, ip.value);
+    if (role && !(removing && user.role === 'admin')) {
+      throw new ApiError(403, 'locked', `PTR records can only be set on usable addresses. This is the ${role} address.`);
+    }
+    return ip;
   }
 
   function saveRecord(row, ipText, input, user) {
@@ -638,7 +821,7 @@ export function createIpam(db) {
     const pattern = likePattern(s);
     const prefixes = db
       .prepare(
-        `${SELECT_PREFIX} WHERE p.cidr LIKE ? ESCAPE '\\' OR p.description LIKE ? ESCAPE '\\' OR p.site LIKE ? ESCAPE '\\'
+        `${SELECT_PREFIX} WHERE p.cidr LIKE ? ESCAPE '\\' OR p.description LIKE ? ESCAPE '\\' OR d.name LIKE ? ESCAPE '\\'
          ORDER BY p.family, p.start_hex LIMIT 25`,
       )
       .all(pattern, pattern, pattern);
@@ -701,11 +884,13 @@ export function createIpam(db) {
     unassignPrefix,
     suggestNext,
     allocate,
+    carve,
+    explore,
     split,
     planDelete,
     applyDelete,
     listAddresses,
-    editableAddress,
+    ptrAddress,
     saveRecord,
     deleteRecord,
     exportAddresses,

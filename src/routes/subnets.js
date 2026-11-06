@@ -1,5 +1,6 @@
 // Shared by both roles. Customers are scoped to their own subnets by ipam.prefixForUser, admins see all.
 import { Router } from 'express';
+import { accountIdOf } from '../ipam.js';
 import { createLimiter } from '../lib/security.js';
 import { ApiError, positiveInt, ptrHostname, text, toCsv } from '../validate.js';
 
@@ -14,7 +15,7 @@ export function subnetRoutes({ ipam, rdns, audit }) {
   }
 
   router.get('/', (req, res) => {
-    res.json({ subnets: ipam.customerPrefixes(req.user.id) });
+    res.json({ subnets: ipam.customerPrefixes(accountIdOf(req.user)) });
   });
 
   router.get('/:id', (req, res) => {
@@ -59,7 +60,7 @@ export function subnetRoutes({ ipam, rdns, audit }) {
 
   router.put('/:id/rdns/:ip', async (req, res) => {
     const row = ipam.prefixForUser(req.params.id, req.user);
-    const ip = ipam.editableAddress(row, req.params.ip, req.user);
+    const ip = ipam.ptrAddress(row, req.params.ip, req.user);
     const hostname = ptrHostname(req.body?.hostname);
     guardRate(req);
     const result = await rdns.setPtr(ip, hostname, req.user);
@@ -69,7 +70,7 @@ export function subnetRoutes({ ipam, rdns, audit }) {
 
   router.delete('/:id/rdns/:ip', async (req, res) => {
     const row = ipam.prefixForUser(req.params.id, req.user);
-    const ip = ipam.editableAddress(row, req.params.ip, req.user);
+    const ip = ipam.ptrAddress(row, req.params.ip, req.user, { removing: true });
     guardRate(req);
     const removed = await rdns.removePtr(ip);
     audit(req, 'rdns.delete', ip.text, removed.hostname);

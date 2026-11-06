@@ -51,18 +51,24 @@ The token is encrypted in the database and never sent back to the browser.
 
 ## How it behaves
 
-- **Reserved addresses.** The network address, gateway and broadcast are locked for customers, in the API as well as the UI. Admins can document the gateway, and can override it per subnet. The default gateway is the first usable address.
+- **Reserved addresses.** The network address, gateway and broadcast cannot be edited by anyone, in the API as well as the UI. Admins can change which address is the gateway from the prefix's Edit dialog. The default gateway is the first usable address.
+- **Drilling down.** The Prefixes page opens any range into smaller blocks, down to single addresses, and refreshes every 15 seconds. Blocks don't need to exist as prefixes. **Use block** turns one into a real prefix and can assign it.
+- **Nesting.** Prefixes can sit inside each other, including inside an assigned subnet, but an address can only be assigned to one customer. A prefix that overlaps an assigned subnet is a label only, and doesn't reserve any of the customer's addresses.
+- **PTR records are for usable addresses only.** Nobody can publish one on a network, gateway or broadcast address, admins included. A subnet can't be assigned, and a gateway can't be moved, if a reserved address would end up with a PTR. Remove it first from the Addresses tab.
+- **Deleting a customer account** removes every PTR the account or its team created from Cloudflare. If any removal fails, the account is kept so nothing is left behind, and you can try again. Removing a single team member keeps their PTRs on the account.
 - **`/31`, `/127` and `/32`.** Point-to-point subnets have no network or broadcast address. A single address has no gateway.
 - **IPv6.** There is no broadcast, and the first address is treated as the network address. Because these subnets are enormous, only addresses with records are listed. Use **Add address** to create one.
 - **Unassigning a subnet** removes the customer's access first, then deletes their address records and PTRs so the next customer inherits nothing. If Cloudflare is unreachable, the access is still removed and the admin is told which PTRs are left over. They can be cleared from the prefix's Addresses tab.
 - **Assignments cannot overlap.** A subnet cannot be assigned if a parent or child of it is already assigned.
 - **Default ranges** are seeded once. A deleted range stays deleted.
+- **Team members.** A customer's owner login and any team member with Admin access can add logins to the account from the Team page. Admin members can edit records and rDNS and manage the team. Read-only members can view and export. Disabling or deleting a customer also cuts off its team.
+- **Datacenters.** Managed under Datacenters in the menu. Allocating a subnet requires one, and VLAN is optional. A datacenter cannot be deleted while prefixes use it.
 
 ## Operations
 
 | Task | Command |
 |---|---|
-| Upgrade | `git pull`, then `sudo bash deploy/install.sh` from the same folder. Data and settings are kept. |
+| Upgrade | `git pull`, then `sudo bash deploy/install.sh` from the same folder. Data and settings are kept, and the database is backed up to `/var/lib/noc-fiberifi/backups/` first. |
 | Logs | `journalctl -u noc-fiberifi -f` |
 | Restart | `sudo systemctl restart noc-fiberifi` |
 | Locked out of admin | `sudo noc-reset-admin admin@fiberifi.com` |

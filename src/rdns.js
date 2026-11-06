@@ -1,5 +1,6 @@
 // PTR management through Cloudflare. Cloudflare is the source of truth, rdns_records is our index of it.
 import { getSetting, setSetting, transaction } from './db.js';
+import { accountIdOf } from './ipam.js';
 import { CloudflareClient } from './lib/cloudflare.js';
 import { formatIp, ipFromPtr, parseCidr, ptrName, reverseZonesFor, toHex } from './lib/ip.js';
 import { decryptSecret, encryptSecret } from './lib/security.js';
@@ -62,12 +63,26 @@ export function createRdns(db, config) {
     for (const extra of duplicates) await cf.deleteRecord(zone.id, extra.id);
 
     db.prepare(
-      `INSERT INTO rdns_records (family, ip_hex, ip, ptr_name, hostname, zone_id, zone_name, record_id, ttl, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO rdns_records (family, ip_hex, ip, ptr_name, hostname, zone_id, zone_name, record_id, ttl, updated_by, account_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (family, ip_hex) DO UPDATE SET hostname = excluded.hostname, zone_id = excluded.zone_id,
          zone_name = excluded.zone_name, record_id = excluded.record_id, ttl = excluded.ttl,
-         updated_by = excluded.updated_by, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
-    ).run(ip.family, ip.hex, ip.text, name, hostname, zone.id, zone.name, record.id, body.ttl, user.email);
+         updated_by = excluded.updated_by, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+         account_id = COALESCE(excluded.account_id, rdns_records.account_id)`,
+    ).run(
+      ip.family,
+      ip.hex,
+      ip.text,
+      name,
+      hostname,
+      zone.id,
+      zone.name,
+      record.id,
+      body.ttl,
+      user.email,
+      // An admin fixing a customer's PTR does not change whose it is.
+      user.role === 'customer' ? accountIdOf(user) : null,
+    );
     return { ip: ip.text, ptr: name, hostname, ttl: body.ttl };
   }
 
@@ -81,10 +96,21 @@ export function createRdns(db, config) {
 
   // Best effort by design: losing Cloudflare must not stop an admin revoking a subnet.
   // Anything that fails stays in rdns_records and is reported, so it can be retried from the prefix page.
-  async function removeRange(family, startHex, endHex) {
-    const rows = db
-      .prepare('SELECT * FROM rdns_records WHERE family = ? AND ip_hex BETWEEN ? AND ?')
-      .all(family, startHex, endHex);
+  function removeRange(family, startHex, endHex) {
+    return removeRows(
+      db.prepare('SELECT * FROM rdns_records WHERE family = ? AND ip_hex BETWEEN ? AND ?').all(family, startHex, endHex),
+    );
+  }
+
+  function countForAccount(accountId) {
+    return db.prepare('SELECT COUNT(*) AS n FROM rdns_records WHERE account_id = ?').get(accountId).n;
+  }
+
+  function removeForAccount(accountId) {
+    return removeRows(db.prepare('SELECT * FROM rdns_records WHERE account_id = ?').all(accountId));
+  }
+
+  async function removeRows(rows) {
     const result = { removed: 0, failed: [] };
     if (!rows.length) return result;
     if (!tokenSet()) return { removed: 0, failed: rows.map((row) => row.ip) };
@@ -199,5 +225,5 @@ export function createRdns(db, config) {
     return getSettings();
   }
 
-  return { enabled: tokenSet, setPtr, removePtr, removeRange, sync, coverage, getSettings, saveSettings };
+  return { enabled: tokenSet, setPtr, removePtr, removeRange, countForAccount, removeForAccount, sync, coverage, getSettings, saveSettings };
 }

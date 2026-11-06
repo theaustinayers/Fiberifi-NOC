@@ -195,6 +195,18 @@ tr.locked td { background: rgb(255 255 255 / 0.02); color: var(--ink-locked); }
 tr.locked:hover td { background: rgb(255 255 255 / 0.02); }
 tr.free .mono { color: var(--ink-2); }
 .lock { display: inline-flex; align-items: center; gap: 6px; }
+.chev {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; margin-right: 4px; padding: 0;
+  background: none; border: 0; border-radius: 4px; color: var(--ink-3); cursor: pointer; vertical-align: middle;
+}
+.chev:hover { background: var(--surface-3); color: var(--ink); }
+.chev svg { transition: rotate 120ms; }
+.chev.open svg { rotate: 90deg; }
+.explore-head td { padding-block: 5px; background: var(--bg); font-size: 12.5px; color: var(--ink-3); }
+.explore-head select { width: auto; min-height: 26px; padding: 1px 6px; margin: 0 6px 0 2px; }
+tbody tr.explore-head:hover td { background: var(--bg); }
+.row-actions { justify-content: flex-end; flex-wrap: nowrap; }
 .empty { padding: 32px 20px; text-align: center; color: var(--ink-3); }
 .empty strong { display: block; color: var(--ink); font-weight: 600; margin-bottom: 2px; }
 .empty .btn { margin-top: 12px; }

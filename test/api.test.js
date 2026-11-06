@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { createApp } from '../src/app.js';
-import { openDatabase, seed } from '../src/db.js';
+import { DatabaseSync } from 'node:sqlite';
+import { migrate, openDatabase, SCHEMA, seed } from '../src/db.js';
 import { startMockCloudflare } from './mock-cloudflare.js';
 
 const CF_TOKEN = 'test-token-abcdefghijklmnopqrstuvwxyz';
@@ -49,6 +50,7 @@ describe('NOC API', () => {
   let acmeId;
   let globexId;
   let aggregate;
+  let datacenterId;
 
   const config = (cfBase) => ({
     production: false,
@@ -72,7 +74,8 @@ describe('NOC API', () => {
   }
 
   async function allocate(parentId, length, customerId) {
-    const { status, data } = await admin.post(`/api/admin/prefixes/${parentId}/allocate`, { length, customerId });
+    datacenterId ??= (await admin.post('/api/admin/datacenters', { name: 'Pittsburgh 1', code: 'PIT1' })).data.datacenter.id;
+    const { status, data } = await admin.post(`/api/admin/prefixes/${parentId}/allocate`, { length, customerId, datacenterId });
     assert.equal(status, 201, JSON.stringify(data));
     return data.prefix;
   }
@@ -206,9 +209,8 @@ describe('NOC API', () => {
       assert.equal(save.data.error.code, 'locked');
       assert.equal((await acme.put(`/api/subnets/${id}/rdns/${ip}`, { hostname: 'a.example.com' })).status, 403, ip);
     }
-    assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.1`, { hostname: 'gw' })).status, 200);
+    assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.1`, { hostname: 'gw' })).status, 403);
     assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.7`, { hostname: 'bc' })).status, 403);
-    await admin.delete(`/api/subnets/${id}/addresses/149.112.89.1`);
   });
 
   test('a customer can keep address records in their own space only', async () => {
@@ -347,12 +349,11 @@ describe('NOC API', () => {
     assert.equal(res.data.error.code, 'resize_blocked');
   });
 
-  test('assigned prefixes cannot be deleted or split', async () => {
+  test('assigned prefixes cannot be deleted', async () => {
     const { data: list } = await acme.get('/api/subnets');
     const id = list.subnets[0].id;
     assert.equal((await admin.delete(`/api/admin/prefixes/${id}`)).status, 409);
     assert.equal((await admin.delete(`/api/admin/prefixes/${aggregate.id}?cascade=true`)).status, 409);
-    assert.equal((await admin.post(`/api/admin/prefixes/${id}/split`, { length: 30 })).status, 409);
   });
 
   test('a customer with subnets cannot be deleted', async () => {
@@ -409,7 +410,9 @@ describe('NOC API', () => {
     assert.equal(res.status, 200, JSON.stringify(res.data));
     assert.equal(res.data.prefix.children.length, 4);
     assert.equal(res.data.prefix.status, 'container');
-    assert.equal((await admin.post(`/api/admin/prefixes/${created.data.prefix.id}/split`, { length: 27 })).status, 409);
+    const again = await admin.post(`/api/admin/prefixes/${created.data.prefix.id}/split`, { length: 27 });
+    assert.equal(again.status, 200, 'a second split nests inside the first');
+    assert.equal(again.data.prefix.children.length, 4, 'direct children are unchanged');
   });
 
   test('deleting with children needs an explicit cascade', async () => {
@@ -470,6 +473,492 @@ describe('NOC API', () => {
     assert.equal((await temp.client.get('/api/subnets')).status, 401);
   });
 
+  describe('team members', () => {
+    let owner;
+    let ownerId;
+    let subnet;
+    let editor;
+    let viewer;
+    let viewerId;
+
+    async function addMember(by, email, access) {
+      const { status, data } = await by.post('/api/team', { name: email.split('@')[0], email, access });
+      assert.equal(status, 201, JSON.stringify(data));
+      const client = new Client(base);
+      await client.post('/api/auth/login', { email, password: data.temporaryPassword });
+      await client.post('/api/auth/change-password', { currentPassword: data.temporaryPassword, newPassword: `${email}-long-password` });
+      return { client, id: data.member.id };
+    }
+
+    before(async () => {
+      ({ client: owner, id: ownerId } = await newCustomer('Umbrella', 'owner@umbrella.example'));
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      subnet = await allocate(tree.prefixes.find((p) => p.cidr === '149.112.89.0/24').id, 28, ownerId);
+    });
+
+    test('the owner adds members, who share the account subnets', async () => {
+      ({ client: editor } = await addMember(owner, 'editor@umbrella.example', 'admin'));
+      ({ client: viewer, id: viewerId } = await addMember(owner, 'viewer@umbrella.example', 'read_only'));
+      for (const client of [editor, viewer]) {
+        const { data } = await client.get('/api/subnets');
+        assert.deepEqual(data.subnets.map((s) => s.cidr), [subnet.cidr]);
+        assert.equal((await client.get(`/api/subnets/${subnet.id}/addresses`)).status, 200);
+      }
+      const me = await viewer.get('/api/auth/me');
+      assert.equal(me.data.user.canEdit, false);
+      assert.equal(me.data.user.accountName, 'Umbrella');
+    });
+
+    test('members cannot see other customers', async () => {
+      const { data } = await globex.get('/api/subnets');
+      assert.equal((await viewer.get(`/api/subnets/${data.subnets[0].id}`)).status, 404);
+      assert.equal((await editor.get(`/api/subnets/${data.subnets[0].id}`)).status, 404);
+    });
+
+    test('an admin member can edit, and a read-only member cannot', async () => {
+      const ip = subnet.firstAddress.replace(/\d+$/, (n) => String(Number(n) + 2));
+      const url = `/api/subnets/${subnet.id}/addresses/${ip}`;
+      assert.equal((await editor.put(url, { hostname: 'web1' })).status, 200);
+
+      const save = await viewer.put(url, { hostname: 'nope' });
+      assert.equal(save.status, 403);
+      assert.equal(save.data.error.code, 'read_only');
+      assert.equal((await viewer.delete(url)).status, 403);
+      assert.equal((await viewer.put(`/api/subnets/${subnet.id}/rdns/${ip}`, { hostname: 'x.umbrella.example' })).status, 403);
+      assert.equal((await viewer.delete(`/api/subnets/${subnet.id}/rdns/${ip}`)).status, 403);
+
+      assert.equal((await viewer.get(`/api/subnets/${subnet.id}/export.csv`)).status, 200);
+    });
+
+    test('a read-only member cannot manage the team', async () => {
+      assert.equal((await viewer.get('/api/team')).status, 403);
+      assert.equal((await viewer.post('/api/team', { name: 'X', email: 'x@u.example' })).status, 403);
+    });
+
+    test('a member cannot touch the owner or another account', async () => {
+      assert.equal((await editor.patch(`/api/team/${ownerId}`, { disabled: true })).status, 404);
+      assert.equal((await editor.delete(`/api/team/${ownerId}`)).status, 404);
+      assert.equal((await editor.post(`/api/team/${ownerId}/reset-password`)).status, 404);
+      assert.equal((await acme.patch(`/api/team/${viewerId}`, { access: 'admin' })).status, 404);
+      assert.equal((await acme.delete(`/api/team/${viewerId}`)).status, 404);
+    });
+
+    test('a member cannot change their own access or remove themselves', async () => {
+      const me = (await editor.get('/api/auth/me')).data.user;
+      assert.equal((await editor.patch(`/api/team/${me.id}`, { access: 'read_only' })).status, 409);
+      assert.equal((await editor.patch(`/api/team/${me.id}`, { disabled: true })).status, 409);
+      assert.equal((await editor.delete(`/api/team/${me.id}`)).status, 409);
+    });
+
+    test('promoting a member takes effect immediately', async () => {
+      assert.equal((await owner.patch(`/api/team/${viewerId}`, { access: 'admin' })).status, 200);
+      assert.equal((await viewer.get('/api/team')).status, 200);
+      assert.equal((await owner.patch(`/api/team/${viewerId}`, { access: 'read_only' })).status, 200);
+      assert.equal((await viewer.get('/api/team')).status, 403);
+    });
+
+    test('members do not count as customers', async () => {
+      const { data } = await admin.get('/api/admin/users');
+      assert.ok(!data.users.some((u) => u.email === 'viewer@umbrella.example'));
+      assert.equal(data.users.find((u) => u.id === ownerId).members, 2);
+      const assign = await admin.post(`/api/admin/prefixes/${subnet.id}/assign`, { customerId: viewerId });
+      assert.equal(assign.status, 400);
+    });
+
+    test('a Fiberifi admin can see and add members', async () => {
+      const { data } = await admin.get(`/api/admin/users/${ownerId}`);
+      assert.equal(data.members.length, 2);
+      const added = await admin.post(`/api/admin/users/${ownerId}/members`, { name: 'Third', email: 'third@umbrella.example', access: 'read_only' });
+      assert.equal(added.status, 201);
+      assert.equal((await admin.post(`/api/admin/users/${viewerId}/members`, { name: 'X', email: 'y@u.example' })).status, 404);
+      await admin.delete(`/api/admin/users/${added.data.member.id}`);
+    });
+
+    test('disabling a member ends their session', async () => {
+      const temp = await addMember(owner, 'temp@umbrella.example', 'read_only');
+      assert.equal((await owner.patch(`/api/team/${temp.id}`, { disabled: true })).status, 200);
+      assert.equal((await temp.client.get('/api/subnets')).status, 401);
+      assert.equal((await owner.delete(`/api/team/${temp.id}`)).status, 200);
+    });
+
+    test('disabling the customer cuts off the whole team', async () => {
+      await admin.patch(`/api/admin/users/${ownerId}`, { disabled: true });
+      assert.equal((await viewer.get('/api/subnets')).status, 401);
+      const login = await new Client(base).post('/api/auth/login', { email: 'viewer@umbrella.example', password: 'viewer@umbrella.example-long-password' });
+      assert.equal(login.status, 401);
+      await admin.patch(`/api/admin/users/${ownerId}`, { disabled: false });
+    });
+
+    test('deleting a customer deletes their team', async () => {
+      await admin.post(`/api/admin/prefixes/${subnet.id}/unassign`, {});
+      assert.equal((await admin.delete(`/api/admin/users/${ownerId}`)).status, 200);
+      assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM users WHERE email LIKE '%umbrella.example'`).get().n, 0);
+    });
+  });
+
+  describe('datacenters', () => {
+    test('customers cannot reach them', async () => {
+      assert.equal((await acme.get('/api/admin/datacenters')).status, 403);
+    });
+
+    test('names are required and unique', async () => {
+      assert.equal((await admin.post('/api/admin/datacenters', { name: '' })).status, 400);
+      assert.equal((await admin.post('/api/admin/datacenters', { name: 'pittsburgh 1' })).status, 409);
+    });
+
+    test('allocation requires a datacenter and VLAN is optional', async () => {
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      const parent = tree.prefixes.find((p) => p.cidr === '206.168.244.0/22');
+      const missing = await admin.post(`/api/admin/prefixes/${parent.id}/allocate`, { length: 30 });
+      assert.equal(missing.status, 400);
+      assert.equal(missing.data.error.field, 'datacenterId');
+      const bad = await admin.post(`/api/admin/prefixes/${parent.id}/allocate`, { length: 30, datacenterId: 99999 });
+      assert.equal(bad.status, 400);
+      const ok = await admin.post(`/api/admin/prefixes/${parent.id}/allocate`, { length: 30, datacenterId });
+      assert.equal(ok.status, 201);
+      assert.equal(ok.data.prefix.datacenter.name, 'Pittsburgh 1');
+      assert.equal(ok.data.prefix.vlan, null);
+      await admin.delete(`/api/admin/prefixes/${ok.data.prefix.id}`);
+    });
+
+    test('customers see the datacenter of their subnet', async () => {
+      const { data } = await acme.get('/api/subnets');
+      assert.equal(data.subnets[0].datacenter.name, 'Pittsburgh 1');
+    });
+
+    test('a datacenter in use cannot be deleted', async () => {
+      const res = await admin.delete(`/api/admin/datacenters/${datacenterId}`);
+      assert.equal(res.status, 409);
+      assert.equal(res.data.error.code, 'in_use');
+      const detail = await admin.get(`/api/admin/datacenters/${datacenterId}`);
+      assert.ok(detail.data.prefixes.length > 0);
+    });
+
+    test('an unused datacenter can be edited and deleted', async () => {
+      const { data } = await admin.post('/api/admin/datacenters', { name: 'Ashburn', code: 'IAD' });
+      const edited = await admin.patch(`/api/admin/datacenters/${data.datacenter.id}`, { address: '21715 Filigree Ct' });
+      assert.equal(edited.data.datacenter.code, 'IAD');
+      assert.equal(edited.data.datacenter.address, '21715 Filigree Ct');
+      assert.equal((await admin.delete(`/api/admin/datacenters/${data.datacenter.id}`)).status, 200);
+    });
+
+    test('search and export use the datacenter name', async () => {
+      const found = await admin.get('/api/admin/search?q=Pittsburgh');
+      assert.ok(found.data.prefixes.length > 0);
+      const csv = await admin.get('/api/admin/prefixes/export.csv');
+      assert.match(csv.data, /datacenter/);
+      assert.match(csv.data, /Pittsburgh 1/);
+    });
+  });
+
+  describe('drill-down and nesting', () => {
+    let block;
+    const explore = (cidr, length) => admin.get(`/api/admin/explore?cidr=${encodeURIComponent(cidr)}${length ? `&length=${length}` : ''}`);
+
+    test('a /22 opens into /24s, and blocks need not exist as prefixes', async () => {
+      const { data } = await explore('206.168.244.0/22');
+      assert.equal(data.kind, 'blocks');
+      assert.equal(data.length, 24);
+      assert.deepEqual(data.rows.map((r) => r.cidr), ['206.168.244.0/24', '206.168.245.0/24', '206.168.246.0/24', '206.168.247.0/24']);
+      assert.equal(data.rows[1].state, 'free');
+      assert.equal(data.rows[1].prefixId, null);
+    });
+
+    test('every level down to /32 can be opened', async () => {
+      assert.equal((await explore('149.112.89.0/24')).data.length, 28);
+      const addresses = await explore('149.112.89.0/28', 32);
+      assert.equal(addresses.data.kind, 'addresses');
+      assert.equal(addresses.data.rows.length, 16);
+      assert.equal((await explore('149.112.89.2/31', 32)).data.rows.length, 2);
+      assert.equal((await explore('149.112.89.2/32')).status, 400);
+    });
+
+    test('blocks show live assignments, at the block and above it', async () => {
+      const { data } = await explore('149.112.89.0/24', 29);
+      const exact = data.rows.find((r) => r.cidr === '149.112.89.8/29');
+      assert.equal(exact.state, 'assigned');
+      assert.equal(exact.customer.id, globexId);
+      const inner = (await explore('149.112.89.8/29', 30)).data.rows[0];
+      assert.equal(inner.state, 'assigned', 'a block inside an assigned subnet shows the owner too');
+      assert.equal(inner.customer.id, globexId);
+      assert.equal(inner.prefixId, null);
+      assert.equal((await explore('206.168.244.0/22')).data.rows[0].state, 'partial');
+      const upper = (await explore('206.168.244.0/22')).data.rows[0];
+      assert.ok(upper.customersInside.length > 0);
+    });
+
+    test('address rows lock the gateway and broadcast and name the owner', async () => {
+      const { data } = await explore('149.112.89.8/29', 32);
+      const by = Object.fromEntries(data.rows.map((r) => [r.ip, r]));
+      assert.equal(by['149.112.89.9'].role, 'gateway');
+      assert.equal(by['149.112.89.9'].locked, true);
+      assert.equal(by['149.112.89.15'].role, 'broadcast');
+      assert.equal(by['149.112.89.15'].locked, true);
+      assert.equal(by['149.112.89.10'].locked, false);
+      assert.equal(by['149.112.89.10'].customer.id, globexId);
+      assert.ok(by['149.112.89.10'].prefixId);
+    });
+
+    test('sizes are limited to 256 rows and to the range you own', async () => {
+      assert.equal((await explore('206.168.244.0/22', 31)).status, 400);
+      assert.equal((await explore('10.0.0.0/24')).status, 404);
+      assert.equal((await acme.get('/api/admin/explore?cidr=149.112.89.0/24')).status, 403);
+    });
+
+    test('IPv6 opens by the nibble', async () => {
+      const { data } = await explore('2607:9340::/32');
+      assert.equal(data.length, 36);
+      assert.equal(data.rows.length, 16);
+    });
+
+    test('any free block can be carved out and assigned in one step', async () => {
+      const { data: found } = await explore('206.168.245.0/24', 28);
+      block = found.rows[2];
+      const noDc = await admin.post('/api/admin/prefixes/carve', { cidr: block.cidr });
+      assert.equal(noDc.status, 400);
+      const res = await admin.post('/api/admin/prefixes/carve', { cidr: block.cidr, customerId: acmeId, datacenterId });
+      assert.equal(res.status, 201, JSON.stringify(res.data));
+      assert.equal(res.data.prefix.customer.id, acmeId);
+      assert.equal((await admin.post('/api/admin/prefixes/carve', { cidr: '10.0.0.0/24', datacenterId })).status, 400);
+    });
+
+    test('admins can nest prefixes inside an assigned subnet without touching the customer', async () => {
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      const assigned = tree.prefixes.find((p) => p.cidr === block.cidr);
+      const label = await admin.post('/api/admin/prefixes/carve', { cidr: assigned.cidr.replace(/\/28$/, '/30'), datacenterId, description: 'rack label' });
+      assert.equal(label.status, 201, JSON.stringify(label.data));
+      assert.equal(label.data.prefix.status, 'container');
+      assert.equal((await admin.patch(`/api/admin/prefixes/${label.data.prefix.id}`, { status: 'active' })).status, 400);
+
+      const split = await admin.post(`/api/admin/prefixes/${assigned.id}/split`, { length: 29 });
+      assert.equal(split.status, 200, JSON.stringify(split.data));
+      assert.equal(split.data.prefix.customer.id, acmeId, 'still assigned');
+      assert.ok(split.data.prefix.gateway, 'keeps its gateway');
+      assert.ok(split.data.prefix.children.every((c) => c.status === 'container'));
+
+      // The nested /30 starts at the subnet, so nothing inside it may have become reserved.
+      const third = assigned.firstAddress.replace(/\d+$/, (n) => String(Number(n) + 3));
+      assert.equal((await acme.put(`/api/subnets/${assigned.id}/addresses/${third}`, { hostname: 'still-usable' })).status, 200);
+    });
+
+    test('an address still cannot belong to two customers', async () => {
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      const label = tree.prefixes.find((p) => p.description === 'rack label');
+      const res = await admin.post(`/api/admin/prefixes/${label.id}/assign`, { customerId: globexId });
+      assert.equal(res.status, 409);
+      assert.equal(res.data.error.code, 'assignment_overlap');
+      const carve = await admin.post('/api/admin/prefixes/carve', { cidr: label.cidr.replace(/\/30$/, '/31'), customerId: globexId, datacenterId });
+      assert.equal(carve.status, 409);
+    });
+  });
+
+  describe('prefix ownership', () => {
+    let mine;
+    let theirs;
+
+    before(async () => {
+      const a = (await acme.get('/api/subnets')).data.subnets;
+      mine = a.find((s) => s.family === 4);
+      theirs = (await globex.get('/api/subnets')).data.subnets.find((s) => s.family === 4);
+      assert.ok(mine && theirs);
+    });
+
+    test('customers cannot call a single admin prefix or settings route', async () => {
+      const id = mine.id;
+      const attempts = [
+        ['post', '/api/admin/prefixes', { cidr: '10.9.0.0/16' }],
+        ['patch', `/api/admin/prefixes/${id}`, { description: 'mine now' }],
+        ['patch', `/api/admin/prefixes/${theirs.id}`, { description: 'hijack' }],
+        ['delete', `/api/admin/prefixes/${id}`],
+        ['post', `/api/admin/prefixes/${id}/assign`, { customerId: acmeId }],
+        ['post', `/api/admin/prefixes/${theirs.id}/assign`, { customerId: acmeId }],
+        ['post', `/api/admin/prefixes/${theirs.id}/unassign`, {}],
+        ['post', `/api/admin/prefixes/${id}/allocate`, { length: 30 }],
+        ['post', `/api/admin/prefixes/${id}/split`, { length: 30 }],
+        ['put', '/api/admin/settings', { ttl: 60 }],
+        ['post', '/api/admin/rdns/sync', {}],
+        ['post', '/api/admin/datacenters', { name: 'X' }],
+      ];
+      for (const [method, url, body] of attempts) {
+        const res = await acme[method](url, body);
+        assert.equal(res.status, 403, `${method} ${url}`);
+      }
+    });
+
+    test('there is no customer route that changes a prefix itself', async () => {
+      for (const method of ['put', 'patch', 'post', 'delete']) {
+        const res = await acme[method](`/api/subnets/${mine.id}`, {});
+        assert.equal(res.status, 404, method);
+      }
+      const before = (await admin.get(`/api/admin/prefixes/${mine.id}`)).data.prefix;
+      assert.equal(before.customer.id, acmeId);
+    });
+
+    test('another customer subnet is invisible by id and by address', async () => {
+      const ip = theirs.firstAddress.replace(/\d+$/, (n) => String(Number(n) + 3));
+      const writes = [
+        ['put', `/api/subnets/${theirs.id}/addresses/${ip}`, { hostname: 'x' }],
+        ['delete', `/api/subnets/${theirs.id}/addresses/${ip}`],
+        ['put', `/api/subnets/${theirs.id}/rdns/${ip}`, { hostname: 'x.evil.example' }],
+        ['delete', `/api/subnets/${theirs.id}/rdns/${ip}`],
+      ];
+      for (const [method, url, body] of writes) assert.equal((await acme[method](url, body)).status, 404, url);
+      // Their address through my subnet id.
+      assert.equal((await acme.put(`/api/subnets/${mine.id}/addresses/${ip}`, { hostname: 'x' })).status, 400);
+      assert.equal((await acme.put(`/api/subnets/${mine.id}/rdns/${ip}`, { hostname: 'x.evil.example' })).status, 400);
+    });
+
+    test('alternate spellings of an address do not get past the range check', async () => {
+      const ip = theirs.firstAddress.replace(/\d+$/, (n) => String(Number(n) + 3));
+      const tricks = [`::ffff:${ip}`, `${ip}%25eth0`, `${ip}/32`, `0${ip}`, '2607:9340:ffff::1'];
+      const count = cf.state.records.length;
+      for (const trick of tricks) {
+        const res = await acme.put(`/api/subnets/${mine.id}/rdns/${encodeURIComponent(trick)}`, { hostname: 'x.evil.example' });
+        assert.equal(res.status, 400, trick);
+      }
+      assert.equal(cf.state.records.length, count);
+    });
+
+    test('a subnet id that does not exist looks the same as someone else subnet', async () => {
+      const missing = await acme.get('/api/subnets/999999');
+      const foreign = await acme.get(`/api/subnets/${theirs.id}`);
+      assert.deepEqual(missing.data, foreign.data);
+    });
+  });
+
+  describe('PTRs on usable addresses only', () => {
+    let subnet;
+
+    before(async () => {
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      subnet = await allocate(tree.prefixes.find((p) => p.cidr === '149.112.89.0/24').id, 29);
+    });
+
+    const addressAt = (offset) => subnet.firstAddress.replace(/\d+$/, (n) => String(Number(n) + offset));
+    const url = (ip) => `/api/subnets/${subnet.id}/rdns/${ip}`;
+
+    test('nobody can set one on the network, gateway or broadcast address, admins included', async () => {
+      const count = cf.state.records.length;
+      for (const offset of [0, 1, 7]) {
+        const res = await admin.put(url(addressAt(offset)), { hostname: 'gw.fiberifi.example' });
+        assert.equal(res.status, 403, String(offset));
+        assert.equal(res.data.error.code, 'locked');
+      }
+      assert.equal(cf.state.records.length, count);
+    });
+
+    test('a usable address still works', async () => {
+      const res = await admin.put(url(addressAt(2)), { hostname: 'ok.fiberifi.example' });
+      assert.equal(res.status, 200, JSON.stringify(res.data));
+    });
+
+    test('an admin cannot move the gateway onto an address with a PTR', async () => {
+      const ok = await admin.put(url(addressAt(3)), { hostname: 'host.fiberifi.example' });
+      assert.equal(ok.status, 200, JSON.stringify(ok.data));
+      const moved = await admin.patch(`/api/admin/prefixes/${subnet.id}`, { gateway: addressAt(3) });
+      assert.equal(moved.status, 400);
+      assert.equal(moved.data.error.field, 'gateway');
+    });
+
+    test('a subnet with a PTR on a reserved address cannot be assigned until it is removed', async () => {
+      // A sync can bring in a PTR that was published outside the panel.
+      db.prepare(
+        `INSERT INTO rdns_records (family, ip_hex, ip, ptr_name, hostname, zone_id, zone_name, record_id, ttl, updated_by)
+         SELECT 4, ip, ?, 'x', 'legacy-gw.example', 'z89', 'z', 'legacy', 300, 'sync' FROM (SELECT ? AS ip)`,
+      ).run(addressAt(1), (await import('../src/lib/ip.js')).toHex((await import('../src/lib/ip.js')).parseIp(addressAt(1)).value));
+
+      const blocked = await admin.post(`/api/admin/prefixes/${subnet.id}/assign`, { customerId: acmeId });
+      assert.equal(blocked.status, 409);
+      assert.equal(blocked.data.error.code, 'ptr_on_reserved');
+
+      const removed = await admin.delete(url(addressAt(1)));
+      assert.equal(removed.status, 200, JSON.stringify(removed.data));
+      assert.equal((await admin.post(`/api/admin/prefixes/${subnet.id}/assign`, { customerId: acmeId })).status, 200);
+    });
+
+    test('a customer cannot remove a PTR on a reserved address', async () => {
+      assert.equal((await acme.delete(url(addressAt(1)))).status, 403);
+    });
+
+    test('/31 and /32 subnets keep their usable addresses', async () => {
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      const parent = tree.prefixes.find((p) => p.cidr === '149.112.89.0/24').id;
+      const p2p = await allocate(parent, 31);
+      assert.equal((await admin.put(`/api/subnets/${p2p.id}/rdns/${p2p.firstAddress}`, { hostname: 'a.fiberifi.example' })).status, 403);
+      assert.equal((await admin.put(`/api/subnets/${p2p.id}/rdns/${p2p.lastAddress}`, { hostname: 'b.fiberifi.example' })).status, 200);
+      const host = await allocate(parent, 32);
+      assert.equal((await admin.put(`/api/subnets/${host.id}/rdns/${host.firstAddress}`, { hostname: 'c.fiberifi.example' })).status, 200);
+    });
+  });
+
+  describe('deleting an account removes its PTRs', () => {
+    let owner;
+    let ownerId;
+    let member;
+    let memberId;
+    let subnet;
+    const ip = (offset) => subnet.firstAddress.replace(/\d+$/, (n) => String(Number(n) + offset));
+
+    before(async () => {
+      ({ client: owner, id: ownerId } = await newCustomer('Wayne', 'owner@wayne.example'));
+      const { data: tree } = await admin.get('/api/admin/prefixes');
+      subnet = await allocate(tree.prefixes.find((p) => p.cidr === '149.112.89.0/24').id, 28, ownerId);
+      const added = await owner.post('/api/team', { name: 'Member', email: 'member@wayne.example', access: 'admin' });
+      memberId = added.data.member.id;
+      member = new Client(base);
+      await member.post('/api/auth/login', { email: 'member@wayne.example', password: added.data.temporaryPassword });
+      await member.post('/api/auth/change-password', { currentPassword: added.data.temporaryPassword, newPassword: 'member-long-password' });
+
+      assert.equal((await owner.put(`/api/subnets/${subnet.id}/rdns/${ip(2)}`, { hostname: 'owner.wayne.example' })).status, 200);
+      assert.equal((await member.put(`/api/subnets/${subnet.id}/rdns/${ip(3)}`, { hostname: 'member.wayne.example' })).status, 200);
+      assert.equal((await admin.put(`/api/subnets/${subnet.id}/rdns/${ip(2)}`, { hostname: 'fixed.wayne.example' })).status, 200);
+    });
+
+    const live = () => cf.state.records.filter((r) => r.content.endsWith('wayne.example')).length;
+
+    test('removing one team member keeps their PTRs on the account', async () => {
+      assert.equal((await owner.delete(`/api/team/${memberId}`)).status, 200);
+      assert.equal(live(), 2);
+    });
+
+    test('the confirmation knows how many will go', async () => {
+      assert.equal((await admin.get(`/api/admin/users/${ownerId}`)).data.ptrCount, 2);
+    });
+
+    test('a failed Cloudflare removal keeps the account so nothing is orphaned', async () => {
+      // Keep the PTRs through the unassign, the way the unticked box does.
+      assert.equal((await admin.post(`/api/admin/prefixes/${subnet.id}/unassign`, { removeRdns: false })).status, 200);
+      assert.equal(live(), 2);
+      cf.state.failDeletes = true;
+      const res = await admin.delete(`/api/admin/users/${ownerId}`);
+      cf.state.failDeletes = false;
+      assert.equal(res.status, 502);
+      assert.equal(res.data.error.code, 'ptr_removal_failed');
+      assert.equal((await admin.get(`/api/admin/users/${ownerId}`)).status, 200);
+      assert.equal(live(), 2);
+    });
+
+    test('deleting the account removes every PTR it or its team created', async () => {
+      const res = await admin.delete(`/api/admin/users/${ownerId}`);
+      assert.equal(res.status, 200, JSON.stringify(res.data));
+      assert.equal(res.data.ptrRemoved, 2);
+      assert.equal(live(), 0);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM rdns_records WHERE account_id = ?').get(ownerId).n, 0);
+    });
+
+    test('PTRs belonging to other accounts are untouched', async () => {
+      assert.ok(db.prepare('SELECT COUNT(*) AS n FROM rdns_records').get().n > 0);
+      assert.ok(cf.state.records.some((r) => r.content === 'mail.acme.example'));
+    });
+
+    test('deleting a Fiberifi admin leaves infrastructure PTRs alone', async () => {
+      const { data } = await admin.post('/api/admin/users', { name: 'Temp', email: 'temp-admin@fiberifi.example', role: 'admin' });
+      const before = cf.state.records.length;
+      assert.equal((await admin.delete(`/api/admin/users/${data.user.id}`)).status, 200);
+      assert.equal(cf.state.records.length, before);
+    });
+  });
+
   test('the last admin cannot be removed', async () => {
     const me = (await admin.get('/api/auth/me')).data.user;
     assert.equal((await admin.delete(`/api/admin/users/${me.id}`)).status, 409);
@@ -502,8 +991,42 @@ test('a tiny allocation is not reported as empty', async () => {
   await seed(db, { adminEmail: 'a@b.example', adminPassword: 'x'.repeat(12), production: false }, () => {});
   const ipam = createIpam(db);
   const parent = ipam.listPrefixes().find((p) => p.cidr === '2607:9340::/32');
-  ipam.allocate(parent.id, { length: 48 });
+  const dc = Number(db.prepare(`INSERT INTO datacenters (name) VALUES ('Test')`).run().lastInsertRowid);
+  ipam.allocate(parent.id, { length: 48, datacenterId: dc });
   const { pct } = ipam.getPrefix(parent.id).utilization;
   assert.ok(pct > 0 && pct < 0.01, String(pct));
+  db.close();
+});
+
+test('upgrading a live database keeps everything and turns sites into datacenters', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec(SCHEMA);
+  db.exec(`
+    INSERT INTO users (id, role, email, name, password_hash) VALUES (1, 'customer', 'c@x.example', 'C', 'h');
+    INSERT INTO prefixes (family, cidr, length, start_hex, end_hex, site, customer_id, vlan) VALUES
+      (4, '10.0.0.0/24', 24, 'a', 'b', 'PIT1', 1, 100),
+      (4, '10.0.1.0/24', 24, 'c', 'd', 'pit1', NULL, NULL),
+      (4, '10.0.2.0/24', 24, 'e', 'f', 'IAD', NULL, NULL),
+      (4, '10.0.3.0/24', 24, 'g', 'h', '', NULL, NULL);
+    INSERT INTO rdns_records (family, ip_hex, ip, ptr_name, hostname, zone_id, zone_name, record_id, ttl, updated_by) VALUES
+      (4, '5', '10.0.0.5', 'p', 'a.example', 'z', 'z', 'r', 300, 'c@x.example'),
+      (4, '6', '10.0.0.6', 'q', 'b.example', 'z', 'z', 's', 300, 'admin@fiberifi.com');
+  `);
+
+  migrate(db);
+  migrate(db);
+
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(db.prepare('SELECT account_id FROM rdns_records WHERE ip = ?').get('10.0.0.5').account_id, 1);
+  assert.equal(db.prepare('SELECT account_id FROM rdns_records WHERE ip = ?').get('10.0.0.6').account_id, null);
+  assert.deepEqual(db.prepare('SELECT name FROM datacenters ORDER BY name').all().map((d) => d.name), ['IAD', 'PIT1']);
+  const rows = db.prepare('SELECT p.cidr, p.vlan, p.customer_id, d.name FROM prefixes p LEFT JOIN datacenters d ON d.id = p.datacenter_id ORDER BY p.cidr').all();
+  assert.deepEqual(rows.map((r) => r.name), ['PIT1', 'PIT1', 'IAD', null]);
+  assert.equal(rows[0].customer_id, 1);
+  assert.equal(rows[0].vlan, 100);
+  assert.ok(!db.prepare('PRAGMA table_info(prefixes)').all().some((c) => c.name === 'site'));
+  const user = db.prepare('SELECT parent_id, access FROM users').get();
+  assert.equal(user.parent_id, null);
   db.close();
 });
