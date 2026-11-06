@@ -148,6 +148,11 @@ export function createMonitor(db, config) {
         db.prepare('UPDATE bgp_sessions SET description = ? WHERE router_id = ? AND peer_ip = ?').run(peer.description, router.id, peer.peerIp);
       }
       if (!previous) continue;
+      // The router's own counters restarted, so a reset from before that no longer means anything.
+      const restarted = peer.inUpdates < previous.in_updates || peer.outUpdates < previous.out_updates || peer.inMessages < previous.in_messages || peer.outMessages < previous.out_messages || peer.transitions < previous.transitions;
+      if (restarted) {
+        db.prepare('UPDATE bgp_sessions SET base_in_updates = 0, base_out_updates = 0, base_in_messages = 0, base_out_messages = 0, base_transitions = 0 WHERE id = ?').run(previous.id);
+      }
       const wasUp = previous.state === 'established';
       const isUp = peer.state === 'established';
       if (wasUp && !isUp) addEvent.run(previous.id, now, 'down', previous.state, peer.state, peer.lastError);
@@ -383,11 +388,11 @@ export function createMonitor(db, config) {
         remoteAs: row.remote_as,
         state: row.state,
         admin: row.admin,
-        inUpdates: row.in_updates,
-        outUpdates: row.out_updates,
-        inMessages: row.in_messages,
-        outMessages: row.out_messages,
-        transitions: row.transitions,
+        inUpdates: Math.max(0, row.in_updates - row.base_in_updates),
+        outUpdates: Math.max(0, row.out_updates - row.base_out_updates),
+        inMessages: Math.max(0, row.in_messages - row.base_in_messages),
+        outMessages: Math.max(0, row.out_messages - row.base_out_messages),
+        transitions: Math.max(0, row.transitions - row.base_transitions),
         stateSeconds: row.state_seconds,
         lastError: row.last_error,
       }));
@@ -410,6 +415,16 @@ export function createMonitor(db, config) {
     const session = requireSession(routerId, sessionId);
     db.prepare('UPDATE bgp_sessions SET label = ? WHERE id = ?').run(text(input.label, { max: 80, field: 'label', label: 'Name' }), session.id);
     return session;
+  }
+
+  // Only changes what the panel shows. Nothing is sent to the router, so no session is touched.
+  function resetBgpStats(routerId) {
+    const router = requireRouter(routerId);
+    db.prepare(
+      `UPDATE bgp_sessions SET base_in_updates = in_updates, base_out_updates = out_updates, base_in_messages = in_messages,
+       base_out_messages = out_messages, base_transitions = transitions WHERE router_id = ?`,
+    ).run(router.id);
+    return router;
   }
 
   function summary(router) {
@@ -490,6 +505,7 @@ export function createMonitor(db, config) {
     liveSample,
     bgpEvents,
     labelSession,
+    resetBgpStats,
     routerHistory,
   };
 }

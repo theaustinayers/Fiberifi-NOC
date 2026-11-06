@@ -4,11 +4,13 @@ import express from 'express';
 import helmet from 'helmet';
 import { createIpam } from './ipam.js';
 import { createMonitor } from './monitor.js';
+import { createNetworkMap } from './netmap.js';
 import { CloudflareError } from './lib/cloudflare.js';
 import { hashToken } from './lib/security.js';
 import { createRdns } from './rdns.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
+import { mapRoutes } from './routes/map.js';
 import { routerRoutes } from './routes/routers.js';
 import { subnetRoutes } from './routes/subnets.js';
 import { teamRoutes } from './routes/team.js';
@@ -73,6 +75,7 @@ export function createApp(db, config) {
       );
     },
   };
+  ctx.networkMap = createNetworkMap(db, ctx.monitor);
 
   app.get('/api/health', (req, res) => res.json({ ok: true }));
 
@@ -136,6 +139,7 @@ export function createApp(db, config) {
     },
   );
   app.use('/api/admin/routers', routerRoutes(ctx));
+  app.use('/api/admin/map', mapRoutes(ctx));
   app.use('/api/admin', adminRoutes(ctx));
 
   app.use('/api', (req, res) => res.status(404).json({ error: { code: 'not_found', message: 'Not found' } }));

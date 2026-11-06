@@ -147,12 +147,30 @@ describe('NOC API', () => {
     assert.equal((await admin.post('/api/admin/prefixes', { cidr: '2001:504:13A::/48' })).status, 201);
   });
 
+  test('the network map works through the real app, and each change is audited', async () => {
+    const empty = await admin.get('/api/admin/map');
+    assert.equal(empty.status, 200);
+    const made = await admin.post('/api/admin/map/nodes', { name: 'Upstream' });
+    assert.equal(made.status, 201);
+    assert.equal((await admin.get('/api/admin/map')).data.nodes.length, 1);
+    const live = await admin.get('/api/admin/map/live');
+    assert.equal(live.status, 200);
+    assert.equal(live.data.nodes[0].status, 'none');
+    assert.equal((await admin.put(`/api/admin/map/nodes/${made.data.node.id}/position`, { x: 10, y: 20 })).status, 200);
+    assert.equal((await admin.delete(`/api/admin/map/nodes/${made.data.node.id}`)).status, 200);
+    const { entries } = (await admin.get('/api/admin/audit')).data;
+    assert.ok(entries.some((entry) => entry.action === 'map.node_create'));
+    assert.ok(entries.some((entry) => entry.action === 'map.node_delete'));
+  });
+
   test('customers cannot reach admin routes', async () => {
     ({ client: acme, id: acmeId } = await newCustomer('Acme', 'noc@acme.example'));
     ({ client: globex, id: globexId } = await newCustomer('Globex', 'noc@globex.example'));
-    for (const url of ['/api/admin/prefixes', '/api/admin/users', '/api/admin/settings', '/api/admin/audit']) {
+    for (const url of ['/api/admin/prefixes', '/api/admin/users', '/api/admin/settings', '/api/admin/audit', '/api/admin/map', '/api/admin/map/live']) {
       assert.equal((await acme.get(url)).status, 403, url);
     }
+    assert.equal((await acme.post('/api/admin/map/nodes', { name: 'Nope' })).status, 403);
+    assert.equal((await acme.post('/api/admin/routers/1/bgp/reset')).status, 403);
     assert.equal((await acme.post('/api/admin/prefixes', { cidr: '10.0.0.0/8' })).status, 403);
   });
 
@@ -1308,7 +1326,7 @@ test('upgrading a live database keeps everything and turns sites into datacenter
   migrate(db);
   migrate(db);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 8);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 10);
   assert.equal(db.prepare('SELECT internal FROM prefixes LIMIT 1').get().internal, 0);
   assert.equal(db.prepare('SELECT account_id FROM rdns_records WHERE ip = ?').get('10.0.0.5').account_id, 1);
   assert.equal(db.prepare('SELECT account_id FROM rdns_records WHERE ip = ?').get('10.0.0.6').account_id, null);

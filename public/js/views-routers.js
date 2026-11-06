@@ -395,6 +395,20 @@ export async function routerDetail({ id }, { reload }) {
     );
   }
 
+  async function resetStats() {
+    const done = await confirmDialog({
+      title: 'Reset BGP stats?',
+      body: 'Updates, messages and times established go back to zero in the panel. Uptime and the disconnect log stay, and nothing is sent to the router, so no session is touched.',
+      confirmLabel: 'Reset stats',
+      danger: false,
+      onConfirm: () => post(`/api/admin/routers/${id}/bgp/reset`),
+    });
+    if (done) {
+      toast('BGP stats reset');
+      reload();
+    }
+  }
+
   function renderSessions() {
     bgpRows.replaceChildren(
       sessions.length
@@ -530,7 +544,7 @@ export async function routerDetail({ id }, { reload }) {
     traffic.element,
     panel('Interfaces', portRows, liveLabel()),
     health.element,
-    panel('BGP sessions', h('div', null, bgpRows, bgpLog), liveLabel()),
+    panel('BGP sessions', h('div', null, bgpRows, bgpLog), h('div', { class: 'actions' }, h('button', { class: 'btn sm', type: 'button', onClick: resetStats }, 'Reset stats'), liveLabel())),
   );
   whileShown(view, refresh);
 

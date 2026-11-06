@@ -430,6 +430,38 @@ describe('monitor', () => {
       assert.equal(cleanDescription('x'.repeat(200)).length, 120);
     });
 
+    test('resetting stats zeroes the counters but not the uptime or the log', async () => {
+      await poll(peer({ inUpdates: 50, outUpdates: 20, inMessages: 500, outMessages: 400, transitions: 4, stateSeconds: 7200 }));
+      const logged = events().length;
+      mon.resetBgpStats(router.id);
+      const reset = session();
+      assert.deepEqual([reset.inUpdates, reset.outUpdates, reset.inMessages, reset.outMessages, reset.transitions], [0, 0, 0, 0, 0]);
+      assert.equal(reset.stateSeconds, 7200);
+      assert.equal(reset.state, 'established');
+      assert.equal(events().length, logged);
+
+      await poll(peer({ inUpdates: 53, outUpdates: 21, inMessages: 510, outMessages: 405, transitions: 4, stateSeconds: 7230 }));
+      assert.deepEqual([session().inUpdates, session().outUpdates, session().inMessages, session().outMessages], [3, 1, 10, 5]);
+    });
+
+    test('a drop is still noticed after a reset', async () => {
+      await poll(peer({ inUpdates: 60, outUpdates: 30, inMessages: 600, outMessages: 500, transitions: 4 }));
+      mon.resetBgpStats(router.id);
+      const logged = events().length;
+      await poll(peer({ inUpdates: 61, outUpdates: 31, inMessages: 601, outMessages: 501, transitions: 6 }));
+      assert.equal(events().length, logged + 1, 'logged as dropped and recovered');
+      assert.equal(session().transitions, 2);
+    });
+
+    test('a router restart clears the reset, so the counters stay true', async () => {
+      await poll(peer({ inUpdates: 70, outUpdates: 40, inMessages: 700, outMessages: 600, transitions: 6 }));
+      mon.resetBgpStats(router.id);
+      await poll(peer({ inUpdates: 2, outUpdates: 1, inMessages: 5, outMessages: 4, transitions: 1 }));
+      assert.deepEqual([session().inUpdates, session().outUpdates, session().transitions], [2, 1, 1]);
+      await poll(peer({ inUpdates: 90, outUpdates: 50, inMessages: 900, outMessages: 800, transitions: 1 }));
+      assert.equal(session().inUpdates, 90);
+    });
+
     test('a router with no BGP data just shows none', async () => {
       await poll();
       assert.equal(mon.listRouters().find((r) => r.name === 'B2').bgpTotal, 0);

@@ -96,6 +96,12 @@ export function routerRoutes({ monitor, sync, audit }) {
 
   router.get('/:id/bgp/:sessionId/events', (req, res) => res.json({ events: monitor.bgpEvents(req.params.id, req.params.sessionId) }));
 
+  router.post('/:id/bgp/reset', (req, res) => {
+    const reset = monitor.resetBgpStats(req.params.id);
+    audit(req, 'bgp.reset_stats', reset.name);
+    res.json({ router: monitor.routerDetail(reset.id) });
+  });
+
   router.patch('/:id/bgp/:sessionId', (req, res) => {
     const session = monitor.labelSession(req.params.id, req.params.sessionId, req.body ?? {});
     audit(req, 'bgp.label', session.peer_ip);

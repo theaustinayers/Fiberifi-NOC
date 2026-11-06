@@ -284,6 +284,40 @@ const MIGRATIONS = [
   (db) => {
     db.exec(`ALTER TABLE bgp_sessions ADD COLUMN description TEXT NOT NULL DEFAULT ''`);
   },
+
+  // 9: the network map. A link is measured on the router at its from end.
+  (db) => {
+    db.exec(`
+      CREATE TABLE map_nodes (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        router_id INTEGER UNIQUE REFERENCES routers (id) ON DELETE SET NULL,
+        x REAL NOT NULL,
+        y REAL NOT NULL
+      );
+      CREATE TABLE map_links (
+        id INTEGER PRIMARY KEY,
+        from_node_id INTEGER NOT NULL REFERENCES map_nodes (id) ON DELETE CASCADE,
+        to_node_id INTEGER NOT NULL REFERENCES map_nodes (id) ON DELETE CASCADE,
+        label TEXT NOT NULL DEFAULT '',
+        interface TEXT NOT NULL,
+        bgp_peer TEXT NOT NULL DEFAULT '',
+        CHECK (from_node_id <> to_node_id)
+      );
+    `);
+  },
+
+  // 10: where each BGP counter stood when an admin last reset the stats. The real counters stay untouched,
+  // because spotting a drop depends on them.
+  (db) => {
+    db.exec(`
+      ALTER TABLE bgp_sessions ADD COLUMN base_in_updates INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE bgp_sessions ADD COLUMN base_out_updates INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE bgp_sessions ADD COLUMN base_in_messages INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE bgp_sessions ADD COLUMN base_out_messages INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE bgp_sessions ADD COLUMN base_transitions INTEGER NOT NULL DEFAULT 0;
+    `);
+  },
 ];
 
 export function migrate(db) {
