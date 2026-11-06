@@ -224,6 +224,26 @@ tbody tr.explore-head:hover td { background: var(--bg); }
 .badge.brand { background: rgb(94 170 253 / 0.14); color: var(--brand-light); }
 
 /* ---- data marks ---- */
+:root { --series-1: #2f8fe6; --series-2: #d9772e; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; touch-action: none; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .tick { fill: var(--ink-3); font: 500 11.5px var(--sans); }
+.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .line.s1 { stroke: var(--series-1); }
+.chart .line.s2 { stroke: var(--series-2); }
+.chart .cross { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart .legend { margin: 0 0 8px; }
+.chart .legend b { color: var(--ink); font-weight: 600; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.swatch.s1 { background: var(--series-1); }
+.swatch.s2 { background: var(--series-2); }
+.chart-tip { position: absolute; top: 34px; z-index: 2; width: 178px; padding: 8px 10px; pointer-events: none; font-size: 12.5px; line-height: 1.5; border-radius: var(--radius-sm); border: 1px solid var(--line-strong); background: var(--surface-3); }
+.chart-tip b { display: block; margin-bottom: 2px; font-weight: 600; }
+.chart-title { margin-bottom: 8px; color: var(--ink-3); }
+.chart-title b { color: var(--ink); }
+tr.selected td { background: rgb(94 170 253 / 0.08); }
+tbody tr.selected:hover td { background: rgb(94 170 253 / 0.08); }
 .meter { display: flex; align-items: center; gap: 8px; min-width: 128px; }
 .meter-track { flex: 1; height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
 .meter-fill { display: block; height: 100%; border-radius: 3px; background: var(--brand-light); }

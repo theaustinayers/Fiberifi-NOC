@@ -1,5 +1,6 @@
 import { addressTable } from './addresses.js';
 import { explorerTable } from './explorer.js';
+import { snmpPanel } from './views-routers.js';
 import { accessBadge, memberFields } from './team.js';
 import {
   badge,
@@ -1169,8 +1170,9 @@ export async function settings(params, { reload }) {
   return h(
     'div',
     null,
-    pageHead('Settings', 'Connect Cloudflare so customers can manage reverse DNS.'),
+    pageHead('Settings', 'Connect Cloudflare for reverse DNS, and SNMP for router monitoring.'),
     panel('Cloudflare', h('div', { class: 'panel-body' }, form), cloudflare.configured ? badge('Connected', 'good') : badge('Not set up', 'warn')),
+    await snmpPanel(),
     cloudflare.configured &&
       panel(
         'Reverse zones',

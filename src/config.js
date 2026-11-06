@@ -30,5 +30,7 @@ export function loadConfig(env = process.env) {
     adminEmail: env.ADMIN_EMAIL || 'admin@fiberifi.com',
     adminPassword: env.ADMIN_PASSWORD || '',
     sessionHours: Number(env.SESSION_HOURS || 12),
+    snmpPort: Number(env.SNMP_PORT || 161),
+    snmpIntervalSeconds: Number(env.SNMP_INTERVAL_SECONDS || 30),
   };
 }

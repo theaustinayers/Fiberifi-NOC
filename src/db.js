@@ -146,6 +146,86 @@ const MIGRATIONS = [
   (db) => {
     db.exec('ALTER TABLE prefixes ADD COLUMN internal INTEGER NOT NULL DEFAULT 0');
   },
+
+  // 4: router monitoring. Octet counters are 64-bit, so they are kept as text.
+  (db) => {
+    db.exec(`
+      CREATE TABLE routers (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        host TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'edge' CHECK (role IN ('core', 'edge')),
+        datacenter_id INTEGER REFERENCES datacenters (id) ON DELETE SET NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'unknown' CHECK (status IN ('unknown', 'up', 'down')),
+        fails INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
+        sys_name TEXT NOT NULL DEFAULT '',
+        sys_descr TEXT NOT NULL DEFAULT '',
+        uptime_seconds INTEGER,
+        cpu REAL,
+        memory REAL,
+        load1 REAL,
+        last_seen INTEGER,
+        polled_at INTEGER
+      );
+
+      CREATE TABLE router_interfaces (
+        id INTEGER PRIMARY KEY,
+        router_id INTEGER NOT NULL REFERENCES routers (id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        if_index INTEGER NOT NULL,
+        alias TEXT NOT NULL DEFAULT '',
+        speed_mbps INTEGER NOT NULL DEFAULT 0,
+        admin TEXT NOT NULL DEFAULT 'unknown',
+        oper TEXT NOT NULL DEFAULT 'unknown',
+        in_octets TEXT NOT NULL DEFAULT '0',
+        out_octets TEXT NOT NULL DEFAULT '0',
+        in_bps REAL,
+        out_bps REAL,
+        in_errors INTEGER NOT NULL DEFAULT 0,
+        out_errors INTEGER NOT NULL DEFAULT 0,
+        in_discards INTEGER NOT NULL DEFAULT 0,
+        out_discards INTEGER NOT NULL DEFAULT 0,
+        counters_at INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (router_id, name)
+      );
+
+      CREATE TABLE interface_samples (
+        interface_id INTEGER NOT NULL REFERENCES router_interfaces (id) ON DELETE CASCADE,
+        ts INTEGER NOT NULL,
+        in_bps REAL,
+        out_bps REAL,
+        PRIMARY KEY (interface_id, ts)
+      ) WITHOUT ROWID;
+
+      CREATE TABLE interface_rollups (
+        interface_id INTEGER NOT NULL REFERENCES router_interfaces (id) ON DELETE CASCADE,
+        ts INTEGER NOT NULL,
+        in_bps REAL,
+        out_bps REAL,
+        in_max REAL,
+        out_max REAL,
+        PRIMARY KEY (interface_id, ts)
+      ) WITHOUT ROWID;
+
+      CREATE TABLE router_samples (
+        router_id INTEGER NOT NULL REFERENCES routers (id) ON DELETE CASCADE,
+        ts INTEGER NOT NULL,
+        cpu REAL,
+        memory REAL,
+        PRIMARY KEY (router_id, ts)
+      ) WITHOUT ROWID;
+
+      CREATE TABLE router_rollups (
+        router_id INTEGER NOT NULL REFERENCES routers (id) ON DELETE CASCADE,
+        ts INTEGER NOT NULL,
+        cpu REAL,
+        memory REAL,
+        PRIMARY KEY (router_id, ts)
+      ) WITHOUT ROWID;
+    `);
+  },
 ];
 
 export function migrate(db) {

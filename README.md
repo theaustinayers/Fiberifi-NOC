@@ -31,6 +31,7 @@
 |---|---|
 | 🔎 **Drill all the way down** | Open a `/22` into `/24`s, then smaller blocks, then single addresses. Blocks don't need to exist first, and assignments update live. |
 | 🧩 **Nest prefixes freely** | Keep a whole range as your own and place customers inside it. The smallest assignment wins, and an address can never belong to two customers. |
+| 📡 **Live router monitoring** | CPU, memory, uptime, and bandwidth on every port and tunnel over encrypted SNMPv3, with history graphs. |
 | 🌐 **Self-service reverse DNS** | Customers publish their own PTR records, straight to Cloudflare, only for addresses they own. |
 | 👥 **Customer teams** | Each customer can add their own Admin and Read only logins. |
 | 🔒 **Safe by default** | Gateway and broadcast addresses are worked out for every prefix and protected on the server, not just greyed out in the browser. |
@@ -91,6 +92,7 @@ Every prefix automatically gets a gateway on its first usable address and a broa
 - Allocate the next free block, or type the exact subnet you want
 - Mark space as Internal, or assign it to a customer
 - Address records with hostname, status, device, MAC and notes
+- Live router status, port bandwidth and history graphs over SNMPv3
 - Datacenters, VLANs, and search across everything
 - CSV export, and a full audit log of every sign-in and change
 
@@ -106,7 +108,7 @@ Every prefix automatically gets a gateway on its first usable address and a broa
 - **Scoped on the server.** Every request is checked against the account's own subnets. Another customer's subnet looks identical to one that doesn't exist.
 - **Passwords** are hashed with scrypt, and first sign-in forces a new one.
 - **Sessions** use `__Host-` HttpOnly, Secure, SameSite=Strict cookies, with a second cross-site check on every write.
-- **The Cloudflare token** is encrypted with AES-256-GCM and never sent back to the browser.
+- **The Cloudflare token and SNMP passwords** are encrypted with AES-256-GCM and never sent back to the browser.
 - **Sign-in and DNS changes** are rate limited.
 - **A strict Content Security Policy** allows no third-party scripts, styles or fonts.
 - **The service** runs as an unprivileged user in a systemd sandbox, and can only write to its own data folder.
@@ -178,6 +180,7 @@ The token is encrypted in the database and never sent back to the browser.
 - **Unassigning a subnet** removes the customer's access first, then deletes their address records and PTRs so the next customer inherits nothing. If Cloudflare is unreachable, the access is still removed and the admin is told which PTRs are left over. They can be cleared from the prefix's Addresses tab.
 - **Default ranges** are seeded once. A deleted range stays deleted.
 - **Team members.** A customer's owner login and any team member with Admin access can add logins to the account from the Team page. Admin members can edit records and rDNS and manage the team. Read-only members can view and export. Disabling or deleting a customer also cuts off its team.
+- **Routers.** Polled over SNMPv3 from the NOC server every 30 seconds, for admins only. A router shows as Down after two failed polls. Detailed history is kept for 2 days and five-minute averages for 35 days. For a router behind a tunnel, use its tunnel IP as the SNMP address.
 - **Datacenters.** Managed under Datacenters in the menu. Allocating a subnet requires one, and VLAN is optional. A datacenter cannot be deleted while prefixes use it.
 
 ## Operations

@@ -3,11 +3,13 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import helmet from 'helmet';
 import { createIpam } from './ipam.js';
+import { createMonitor } from './monitor.js';
 import { CloudflareError } from './lib/cloudflare.js';
 import { hashToken } from './lib/security.js';
 import { createRdns } from './rdns.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
+import { routerRoutes } from './routes/routers.js';
 import { subnetRoutes } from './routes/subnets.js';
 import { teamRoutes } from './routes/team.js';
 import { createTeam } from './team.js';
@@ -55,6 +57,7 @@ export function createApp(db, config) {
     ipam: createIpam(db),
     rdns: createRdns(db, config),
     team: createTeam(db),
+    monitor: createMonitor(db, config),
     cookieName: config.secureCookies ? '__Host-noc_session' : 'noc_session',
     audit(req, action, target = '', detail = '') {
       db.prepare('INSERT INTO audit_log (actor_id, actor, action, target, detail, ip) VALUES (?, ?, ?, ?, ?, ?)').run(
@@ -128,8 +131,9 @@ export function createApp(db, config) {
       if (req.user.role !== 'admin') throw new ApiError(403, 'forbidden', 'Admin access required');
       next();
     },
-    adminRoutes(ctx),
   );
+  app.use('/api/admin/routers', routerRoutes(ctx));
+  app.use('/api/admin', adminRoutes(ctx));
 
   app.use('/api', (req, res) => res.status(404).json({ error: { code: 'not_found', message: 'Not found' } }));
 
@@ -165,5 +169,6 @@ export function createApp(db, config) {
     res.status(500).json({ error: { code: 'server_error', message: 'Something went wrong on our side' } });
   });
 
+  app.locals.monitor = ctx.monitor;
   return app;
 }

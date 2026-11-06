@@ -1,5 +1,6 @@
 import { addressTable } from './addresses.js';
 import { ApiFailure, buildForm, emptyState, get, go, h, icon, meter, notice, pageHead, panel, plural, post, session, table, toast } from './lib.js';
+import * as routerViews from './views-routers.js';
 import { teamView } from './team.js';
 import * as admin from './views-admin.js';
 
@@ -169,6 +170,7 @@ const ADMIN_NAV = [
   ['/', 'Overview', 'grid'],
   ['/prefixes', 'Prefixes', 'tree'],
   ['/datacenters', 'Datacenters', 'server'],
+  ['/routers', 'Routers', 'pulse'],
   ['/accounts', 'Accounts', 'users'],
   ['/audit', 'Audit log', 'list'],
   ['/settings', 'Settings', 'gear'],
@@ -185,6 +187,8 @@ const ADMIN_ROUTES = [
   [/^\/prefixes\/(?<id>\d+)$/, admin.prefixDetail, 'Prefix'],
   [/^\/datacenters$/, admin.datacenters, 'Datacenters'],
   [/^\/datacenters\/(?<id>\d+)$/, admin.datacenterDetail, 'Datacenter'],
+  [/^\/routers$/, routerViews.routers, 'Routers'],
+  [/^\/routers\/(?<id>\d+)$/, routerViews.routerDetail, 'Router'],
   [/^\/accounts$/, admin.accounts, 'Accounts'],
   [/^\/accounts\/(?<id>\d+)$/, admin.accountDetail, 'Account'],
   [/^\/search$/, admin.search, 'Search'],
