@@ -51,10 +51,11 @@ The token is encrypted in the database and never sent back to the browser.
 
 ## How it behaves
 
-- **Reserved addresses.** The network address, gateway and broadcast cannot be edited by anyone, in the API as well as the UI. Admins can change which address is the gateway from the prefix's Edit dialog. The default gateway is the first usable address.
+- **Reserved addresses.** Every prefix automatically has a network address, a gateway on the first usable address, and a broadcast on the last. Network and broadcast cannot be edited by anyone. Admins can edit the gateway's record, and move it from the prefix's Edit dialog. Customers see all three locked, in the API as well as the UI. IPv6 has no broadcast.
+- **Which prefix decides.** When prefixes nest, the smallest one decides what an address is, so a `/22`'s gateway can't take a usable address from a `/31` inside it. Anything nested inside a customer's subnet is a label and reserves nothing.
 - **Drilling down.** The Prefixes page opens any range into smaller blocks, down to single addresses, and refreshes every 15 seconds. Blocks don't need to exist as prefixes. **Use block** turns one into a real prefix and can assign it.
 - **Internal space.** Choose **Internal (Fiberifi)** instead of a customer for space you use yourselves. **Release** removes the mark and keeps its records and PTRs.
-- **Whole prefixes.** Allocating a prefix at its own size, such as `/22` from a `/22`, uses the whole prefix instead of subdividing it. Marking a main range Internal reserves no addresses.
+- **Whole prefixes.** Allocating a prefix at its own size, such as `/22` from a `/22`, uses the whole prefix instead of subdividing it.
 - **Nesting.** Prefixes can sit inside each other, and the smallest assignment wins: a customer can have a block inside an Internal range, and everything around it stays yours. An address can only belong to one customer, and a customer can't be given a block that contains a smaller Internal one. A prefix nested inside a customer's subnet is a label only, and doesn't reserve any of their addresses.
 - **PTR records are for usable addresses only.** Nobody can publish one on a network, gateway or broadcast address, admins included. A subnet can't be assigned, and a gateway can't be moved, if a reserved address would end up with a PTR. Remove it first from the Addresses tab.
 - **Deleting a customer account** removes every PTR the account or its team created from Cloudflare. If any removal fails, the account is kept so nothing is left behind, and you can try again. Removing a single team member keeps their PTRs on the account.

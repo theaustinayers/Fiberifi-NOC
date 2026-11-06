@@ -64,6 +64,10 @@ export function editAddress(subnetId, row, onChange) {
   let ptrHint = 'Goes live in public DNS when you save. Clear it to remove the PTR.';
   if (readOnly) {
     ptrHint = '';
+  } else if (row.role) {
+    ptrHint = row.rdns
+      ? 'Gateways cannot have a PTR. Clear this field to remove it.'
+      : 'Gateways cannot have a PTR. To use a different address as the gateway, choose Edit on the prefix.';
   } else if (!session.rdnsEnabled) {
     ptrHint = isAdmin ? 'Add a Cloudflare API token in Settings to manage PTR records.' : 'Reverse DNS is not available yet. Contact Fiberifi support.';
   }
@@ -126,7 +130,7 @@ export function editAddress(subnetId, row, onChange) {
             value: ptrInitial,
             placeholder: 'mail.example.com',
             mono: true,
-            disabled: !session.rdnsEnabled,
+            disabled: !session.rdnsEnabled || (Boolean(row.role) && !row.rdns),
             hint: ptrHint,
           },
         ].map(lock),
@@ -142,7 +146,7 @@ function rowFor(subnetId, row, reload) {
     // A sync can import a PTR that breaks the usable-only rule, so admins get a way to clear it.
     return h(
       'tr',
-      { class: 'locked', title: 'Gateway and broadcast addresses cannot be edited.' },
+      { class: 'locked', title: 'This address cannot be edited.' },
       h('td', { class: 'mono nowrap' }, row.ip),
       h('td', { colSpan: row.rdns ? 4 : 5 }, h('span', { class: 'lock' }, icon('lock', 14), ROLE_LABEL[row.role])),
       row.rdns &&
@@ -169,7 +173,7 @@ function rowFor(subnetId, row, reload) {
     ),
     h('td', { class: 'mono' }, row.record?.hostname ?? ''),
     h('td', { class: 'break' }, row.record?.description ?? ''),
-    h('td', null, statusInfo ? badge(statusInfo[0], statusInfo[1]) : free ? h('span', { class: 'muted' }, 'Free') : ''),
+    h('td', null, row.role ? badge(ROLE_LABEL[row.role], 'brand') : statusInfo ? badge(statusInfo[0], statusInfo[1]) : free ? h('span', { class: 'muted' }, 'Free') : ''),
     h('td', { class: 'mono nowrap' }, row.record?.mac ?? ''),
     h('td', { class: 'mono break' }, row.rdns?.hostname ?? ''),
   );

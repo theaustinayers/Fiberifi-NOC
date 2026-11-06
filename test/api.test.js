@@ -209,8 +209,9 @@ describe('NOC API', () => {
       assert.equal(save.data.error.code, 'locked');
       assert.equal((await acme.put(`/api/subnets/${id}/rdns/${ip}`, { hostname: 'a.example.com' })).status, 403, ip);
     }
-    assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.1`, { hostname: 'gw' })).status, 403);
+    assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.1`, { hostname: 'gw' })).status, 200);
     assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.7`, { hostname: 'bc' })).status, 403);
+    await admin.delete(`/api/subnets/${id}/addresses/149.112.89.1`);
   });
 
   test('a customer can keep address records in their own space only', async () => {
@@ -691,7 +692,7 @@ describe('NOC API', () => {
       const { data } = await explore('149.112.89.8/29', 32);
       const by = Object.fromEntries(data.rows.map((r) => [r.ip, r]));
       assert.equal(by['149.112.89.9'].role, 'gateway');
-      assert.equal(by['149.112.89.9'].locked, true);
+      assert.equal(by['149.112.89.9'].locked, false, 'admins can edit the gateway');
       assert.equal(by['149.112.89.15'].role, 'broadcast');
       assert.equal(by['149.112.89.15'].locked, true);
       assert.equal(by['149.112.89.10'].locked, false);
@@ -829,8 +830,7 @@ describe('NOC API', () => {
       assert.equal(res.data.prefix.vlan, 200);
       assert.equal(res.data.prefix.description, 'Fiberifi allocation', 'a blank description keeps the old one');
       assert.equal(res.data.prefix.status, 'container');
-      assert.equal(res.data.prefix.gateway, null, 'a main range reserves nothing');
-      assert.equal(res.data.prefix.network, null);
+      assert.equal(res.data.prefix.gateway, '2001:504:13a::1');
 
       const child = await admin.post(`/api/admin/prefixes/${range.id}/allocate`, { length: 64, customerId: acmeId, datacenterId });
       assert.equal(child.status, 201, 'customers can still be assigned inside it');
@@ -875,6 +875,81 @@ describe('NOC API', () => {
 
     test('customers cannot mark anything internal', async () => {
       assert.equal((await acme.post('/api/admin/prefixes/carve', { cidr: '206.168.247.0/24', customerId: 'internal' })).status, 403);
+    });
+  });
+
+  describe('every prefix has a gateway and broadcast', () => {
+    const rows = async (cidr, length) => {
+      const { data } = await admin.get(`/api/admin/explore?cidr=${encodeURIComponent(cidr)}&length=${length}`);
+      return Object.fromEntries(data.rows.map((r) => [r.ip, r]));
+    };
+
+    test('a /22 has its gateway on .1 and broadcast on the last address', async () => {
+      const { data } = await admin.get('/api/admin/prefixes');
+      const range = data.prefixes.find((p) => p.cidr === '206.168.244.0/22');
+      assert.equal(range.status, 'container');
+      assert.equal(range.gateway, '206.168.244.1');
+      assert.equal(range.broadcast, '206.168.247.255');
+      assert.equal(range.network, '206.168.244.0');
+      assert.equal(range.usable, '1,021');
+
+      const end = await rows('206.168.247.240/28', 32);
+      assert.equal(end['206.168.247.255'].role, 'broadcast');
+      assert.equal(end['206.168.247.255'].locked, true);
+      assert.equal(end['206.168.247.254'].role, null);
+    });
+
+    test('the gateway stays editable and can be moved, and broadcast cannot', async () => {
+      const { data } = await admin.get('/api/admin/prefixes');
+      const range = data.prefixes.find((p) => p.cidr === '2607:9340::/32');
+      assert.equal(range.gateway, '2607:9340::1');
+      assert.equal(range.broadcast, null, 'IPv6 has no broadcast');
+
+      const target = data.prefixes.find((p) => p.cidr === '206.168.244.0/22');
+      const url = `/api/subnets/${target.id}/addresses`;
+      assert.equal((await admin.put(`${url}/206.168.247.255`, { hostname: 'x' })).status, 403);
+      const moved = await admin.patch(`/api/admin/prefixes/${target.id}`, { gateway: '206.168.247.254' });
+      assert.equal(moved.status, 200, JSON.stringify(moved.data));
+      assert.equal(moved.data.prefix.gateway, '206.168.247.254');
+      assert.equal((await rows('206.168.247.240/28', 32))['206.168.247.254'].role, 'gateway');
+      assert.equal((await admin.patch(`/api/admin/prefixes/${target.id}`, { gateway: '206.168.247.255' })).status, 400);
+      await admin.patch(`/api/admin/prefixes/${target.id}`, { gateway: '' });
+    });
+
+    test('nobody can publish a PTR on the /22 gateway or broadcast', async () => {
+      const { data } = await admin.get('/api/admin/prefixes');
+      const target = data.prefixes.find((p) => p.cidr === '149.112.89.0/24');
+      assert.equal((await admin.put(`/api/subnets/${target.id}/rdns/149.112.89.255`, { hostname: 'a.fiberifi.example' })).status, 403);
+    });
+
+    test('the smallest prefix decides, so a /31 keeps its usable address', async () => {
+      const edge = await admin.post('/api/admin/prefixes/carve', { cidr: '206.168.247.254/31', datacenterId, customerId: acmeId });
+      assert.equal(edge.status, 201, JSON.stringify(edge.data));
+      const id = edge.data.prefix.id;
+      assert.equal((await acme.put(`/api/subnets/${id}/addresses/206.168.247.255`, { hostname: 'cpe' })).status, 200, 'the /22 broadcast does not take it');
+      assert.equal((await acme.put(`/api/subnets/${id}/addresses/206.168.247.254`, { hostname: 'x' })).status, 403, 'the /31 gateway stays locked');
+      await admin.post(`/api/admin/prefixes/${id}/unassign`, {});
+      await admin.delete(`/api/admin/prefixes/${id}`);
+    });
+
+    test('a label inside a customer subnet reserves nothing and shows no gateway', async () => {
+      const { data: mine } = await acme.get('/api/subnets');
+      const subnet = mine.subnets.find((s) => s.family === 4 && s.length <= 28);
+      const third = subnet.firstAddress.replace(/\d+$/, (n) => String(Number(n) + 5));
+      const label = await admin.post('/api/admin/prefixes/carve', { cidr: `${subnet.firstAddress.replace(/\d+$/, (n) => String(Number(n) + 4))}/30`, datacenterId });
+      assert.equal(label.status, 201, JSON.stringify(label.data));
+      assert.equal(label.data.prefix.gateway, null);
+      assert.equal(label.data.prefix.broadcast, null);
+      assert.equal((await acme.put(`/api/subnets/${subnet.id}/addresses/${third}`, { hostname: 'usable' })).status, 200);
+      await admin.delete(`/api/admin/prefixes/${label.data.prefix.id}`);
+    });
+
+    test('customers still see the gateway locked', async () => {
+      const { data } = await acme.get('/api/subnets');
+      const subnet = data.subnets.find((s) => s.family === 4);
+      assert.equal((await acme.put(`/api/subnets/${subnet.id}/addresses/${subnet.gateway}`, { hostname: 'x' })).status, 403);
+      const list = await acme.get(`/api/subnets/${subnet.id}/addresses`);
+      assert.equal(list.data.rows.find((r) => r.ip === subnet.gateway).locked, true);
     });
   });
 

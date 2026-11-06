@@ -38,8 +38,8 @@ function bounds(row) {
   return { family: row.family, length: row.length, network: fromHex(row.start_hex), last: fromHex(row.end_hex) };
 }
 
+// Every prefix has these, containers included. Which one applies to an address is decided by roleAt.
 function rolesOf(row) {
-  if (row.status === 'container') return { network: null, gateway: null, broadcast: null };
   const gateway = row.gateway ? parseIp(row.gateway).value : null;
   return subnetRoles({ ...bounds(row), gateway });
 }
@@ -57,10 +57,10 @@ export function canManageTeam(user) {
   return user.role === 'customer' && canEdit(user);
 }
 
-// Reserved addresses are configuration, not records, so nobody edits them directly, admins included.
-// An admin changes the gateway through the prefix itself.
-export function isLocked(role) {
-  return Boolean(role);
+// Network and broadcast are never editable. Admins can edit the gateway, customers cannot.
+export function isLocked(role, user) {
+  if (role === 'network' || role === 'broadcast') return true;
+  return role === 'gateway' && user.role !== 'admin';
 }
 
 function likePattern(q) {
@@ -174,7 +174,8 @@ export function createIpam(db) {
 
   function serialize(row, childRows = directChildren(row)) {
     const b = bounds(row);
-    const roles = rolesOf(row);
+    const isLabel = !row.customer_id && q.covering.all(row.family, row.start_hex, row.end_hex).some((r) => r.customer_id);
+    const roles = isLabel ? { network: null, gateway: null, broadcast: null } : rolesOf(row);
     const { records, rdns } = counts(row);
     const fmt = (v) => (v === null ? null : formatIp(row.family, v));
     return {
@@ -465,11 +466,9 @@ export function createIpam(db) {
       throw new ApiError(409, 'already_assigned', `${row.cidr} is assigned to ${row.customer_name}. Unassign it first.`);
     }
     assertNotInsideCustomer(row.family, row.id, row.start_hex, row.end_hex);
-    // A container stays one: a main range has no gateway of its own and reserves nothing.
-    const address = row.status === 'container' ? null : cleanGateway(gateway, row);
     db.prepare(
       `UPDATE prefixes SET internal = 1, gateway = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-    ).run(address, row.id);
+    ).run(cleanGateway(gateway, row), row.id);
     return { prefix: getPrefix(row.id), customer: { company: 'Internal' } };
   }
 
@@ -633,21 +632,24 @@ export function createIpam(db) {
   function rolesInRange(row) {
     const map = new Map();
     for (const r of q.overlapping.all(row.family, row.end_hex, row.start_hex)) {
-      if (r.status === 'container') continue;
-      for (const [role, value] of Object.entries(rolesOf(r))) {
-        if (value !== null) map.set(toHex(value), role);
+      for (const value of Object.values(rolesOf(r))) {
+        if (value === null) continue;
+        const role = roleAt(row.family, value);
+        if (role) map.set(toHex(value), role);
       }
     }
     return map;
   }
 
+  // The smallest prefix decides, so a /22's gateway cannot take the usable address of a /31 inside it.
+  // A customer's subnet is the exception: anything nested in it is a label and reserves nothing.
   function roleAt(family, value) {
     const hex = toHex(value);
-    for (const r of q.covering.all(family, hex, hex)) {
-      if (r.status === 'container') continue;
-      for (const [role, roleValue] of Object.entries(rolesOf(r))) {
-        if (roleValue === value) return role;
-      }
+    const covering = q.covering.all(family, hex, hex);
+    const deciding = covering.find((r) => r.customer_id) ?? covering[0];
+    if (!deciding) return null;
+    for (const [role, roleValue] of Object.entries(rolesOf(deciding))) {
+      if (roleValue === value) return role;
     }
     return null;
   }
@@ -665,7 +667,7 @@ export function createIpam(db) {
       return {
         ip: formatIp(row.family, value),
         role,
-        locked: isLocked(role),
+        locked: isLocked(role, user),
         record: record
           ? {
               hostname: record.hostname,
@@ -823,7 +825,7 @@ export function createIpam(db) {
     assertCanEdit(user);
     const ip = resolveAddress(row, ipText);
     const role = roleAt(ip.family, ip.value);
-    if (isLocked(role)) {
+    if (isLocked(role, user)) {
       throw new ApiError(403, 'locked', `The ${role} address cannot be edited`);
     }
     return ip;

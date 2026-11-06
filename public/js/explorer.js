@@ -164,7 +164,7 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
     if (row.locked) {
       return h(
         'tr',
-        { class: 'locked', title: 'Gateway and broadcast addresses cannot be edited.' },
+        { class: 'locked', title: 'This address cannot be edited.' },
         h('td', { class: 'mono nowrap' }, indent(depth + 1), row.ip),
         h('td', null, h('span', { class: 'lock' }, icon('lock', 14), ROLE_LABEL[row.role])),
         h('td', { colSpan: 5, class: 'mono' }, row.rdns?.hostname ?? ''),
@@ -181,7 +181,7 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
         indent(depth + 1),
         h('button', { class: 'cell-link mono', type: 'button', onClick: () => editAddress(row.prefixId, row, render) }, row.ip),
       ),
-      h('td', null, status ? badge(status[0], status[1]) : h('span', { class: 'muted' }, 'Free')),
+      h('td', null, row.role ? badge(ROLE_LABEL[row.role], 'brand') : status ? badge(status[0], status[1]) : h('span', { class: 'muted' }, 'Free')),
       h('td', { colSpan: 2 }, row.customer ? customerLink(row.customer) : row.internal ? INTERNAL : ''),
       h('td', { class: 'break' }, row.record?.description ?? ''),
       h('td', { class: 'mono', colSpan: 2 }, row.record?.hostname ?? ''),
