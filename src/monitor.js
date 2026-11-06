@@ -13,10 +13,13 @@ const MAX_POINTS = 360;
 
 export const RANGES = { '5m': 300, '15m': 900, '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 };
 
-// snmpd refreshes interface counters every 3 seconds, so pages read every 6 to land at the same point in
-// that cycle. Reading every 5 was measured at up to 45% off on steady traffic. This also stops several
-// open pages adding load.
-const LIVE_MIN_MS = 5000;
+// Open pages read once a second, but snmpd only refreshes interface counters every 3 seconds. A plain
+// 1-second rate would show traffic, then two zeros. So a rate is only worked out when the counters move,
+// over the time since they last moved, and held until then. No movement for longer than this means idle.
+const LIVE_MIN_MS = 900;
+const LIVE_HOLD_MS = 4500;
+// BGP goes through AgentX to bgpd, so it is read less often than the rest.
+const LIVE_BGP_MS = 6000;
 // An interface missing for this long has been removed from the router.
 const GONE_AFTER_MS = 3600 * 1000;
 
@@ -33,7 +36,7 @@ export function rate(previous, current, seconds) {
 
 export function createMonitor(db, config) {
   const reader = config.snmpReader ?? ((host, credentials) => readRouter(host, credentials, { port: config.snmpPort }));
-  const liveReader = config.snmpLiveReader ?? ((host, credentials) => readLive(host, credentials, { port: config.snmpPort }));
+  const liveReader = config.snmpLiveReader ?? ((host, credentials, options) => readLive(host, credentials, { ...options, port: config.snmpPort }));
   const intervalMs = (config.snmpIntervalSeconds ?? 30) * 1000;
   const liveReadings = new Map();
   const liveRequests = new Map();
@@ -294,9 +297,10 @@ export function createMonitor(db, config) {
   async function takeLiveReading(router, last, now) {
     const creds = credentials();
     if (!creds) throw new ApiError(409, 'snmp_not_configured', 'Add the SNMP username and password first');
+    const includeBgp = !last || now - last.bgpAt >= LIVE_BGP_MS;
     let data;
     try {
-      data = await liveReader(router.host, creds);
+      data = await liveReader(router.host, creds, { includeBgp });
     } catch (error) {
       throw new ApiError(502, 'snmp_error', `Could not read ${router.name}: ${error.message}`);
     }
@@ -308,16 +312,21 @@ export function createMonitor(db, config) {
       const row = rows.get(reading.index);
       if (!row) continue;
       // With no live readings yet it measures from the last poll, so the first sample already has a rate.
-      const previous = last?.counters.get(row.id);
-      const from = previous ? { ...previous, at: last.at } : { at: row.counters_at, inOctets: BigInt(row.in_octets), outOctets: BigInt(row.out_octets) };
-      const seconds = (now - from.at) / 1000;
-      counters.set(row.id, { inOctets: reading.inOctets, outOctets: reading.outOctets });
-      interfaces.push({
-        id: row.id,
-        oper: reading.oper,
-        in_bps: rate(from.inOctets, reading.inOctets, seconds),
-        out_bps: rate(from.outOctets, reading.outOctets, seconds),
-      });
+      const previous = last?.counters.get(row.id) ?? { at: row.counters_at, inOctets: BigInt(row.in_octets), outOctets: BigInt(row.out_octets), in_bps: row.in_bps, out_bps: row.out_bps };
+      const unmoved = previous.inOctets === reading.inOctets && previous.outOctets === reading.outOctets;
+      let entry = previous;
+      if (!unmoved || now - previous.at >= LIVE_HOLD_MS) {
+        const seconds = (now - previous.at) / 1000;
+        entry = {
+          at: now,
+          inOctets: reading.inOctets,
+          outOctets: reading.outOctets,
+          in_bps: rate(previous.inOctets, reading.inOctets, seconds),
+          out_bps: rate(previous.outOctets, reading.outOctets, seconds),
+        };
+      }
+      counters.set(row.id, entry);
+      interfaces.push({ id: row.id, oper: reading.oper, in_bps: entry.in_bps, out_bps: entry.out_bps });
     }
 
     // Busy share of the ticks since the last reading. Until there is one, the last polled figure stands in.
@@ -330,8 +339,8 @@ export function createMonitor(db, config) {
     }
 
     transaction(db, () => storeBgp(router, data.bgp, now));
-    const sample = { ts: Math.floor(now / 1000), cpu, memory: data.memory, interfaces, bgp: bgpSessions(router) };
-    liveReadings.set(router.id, { at: now, counters, cpuTicks: data.cpuTicks, sample });
+    const sample = { ts: Math.floor(now / 1000), cpu, memory: data.memory, interfaces, bgp: includeBgp ? bgpSessions(router) : undefined };
+    liveReadings.set(router.id, { at: now, counters, cpuTicks: data.cpuTicks, sample, bgpAt: includeBgp ? now : last.bgpAt });
     return sample;
   }
 

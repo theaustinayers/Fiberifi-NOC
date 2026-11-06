@@ -4,7 +4,7 @@ import { h } from './lib.js';
 const NS = 'http://www.w3.org/2000/svg';
 const WIDTH = 900;
 const HEIGHT = 240;
-const PAD = { top: 12, right: 12, bottom: 24, left: 62 };
+const PAD = { top: 12, right: 12, bottom: 24, left: 86 };
 
 function svg(tag, attrs, ...children) {
   const el = document.createElementNS(NS, tag);

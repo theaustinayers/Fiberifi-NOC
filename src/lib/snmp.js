@@ -137,7 +137,7 @@ function memoryPercent(values) {
 
 // Everything a live page needs, in one short read. CPU comes back as raw ticks because the usual
 // CPU figures are one-minute averages, which would look frozen at this speed.
-export async function readLive(host, credentials, { port = 161 } = {}) {
+export async function readLive(host, credentials, { port = 161, includeBgp = true } = {}) {
   const session = open(host, credentials, port);
   try {
     const values = await getScalars(session, [
@@ -158,7 +158,7 @@ export async function readLive(host, credentials, { port = 161 } = {}) {
     return {
       cpuTicks: idle === undefined || busy.includes(undefined) ? null : { idle: Number(idle), total: Number(idle) + busy.reduce((sum, ticks) => sum + Number(ticks), 0) },
       memory: memoryPercent(values),
-      bgp: await readBgp(session),
+      bgp: includeBgp ? await readBgp(session) : undefined,
       interfaces: [...inOctets.keys()].map((index) => ({
         index: Number(index),
         oper: IF_STATUS[oper.get(index)] ?? 'unknown',

@@ -4,9 +4,8 @@ import { badge, buildForm, confirmDialog, del, emptyState, formDialog, get, go, 
 const REFRESH_MS = 15000;
 const RANGES = [['5m', '5 minutes'], ['15m', '15 minutes'], ['1h', '1 hour'], ['6h', '6 hours'], ['24h', '24 hours'], ['7d', '7 days'], ['30d', '30 days']];
 const LIVE_RANGES = [['live', 'Realtime'], ...RANGES];
-// Six, not five: see LIVE_MIN_MS in monitor.js.
-const LIVE_MS = 6000;
-const LIVE_POINTS = 60;
+const LIVE_MS = 1000;
+const LIVE_POINTS = 300;
 
 export function formatBits(bps) {
   if (bps === null || bps === undefined) return '—';
@@ -199,8 +198,12 @@ export async function routerDetail({ id }, { reload }) {
   let liveFor = null;
   let healthRows = null;
 
-  const isLive = () => Date.now() - liveAt < LIVE_MS * 2;
-  const liveLabel = () => h('span', { class: 'badge good' }, 'Live, every 6 seconds');
+  const isLive = () => Date.now() - liveAt < 5000;
+  const liveLabel = () => h('span', { class: 'badge good' }, 'Live');
+  // Rebuilding under the pointer would close the tooltip and swallow clicks, so a hovered graph waits.
+  const redraw = (chart) => {
+    if (chart.range() === 'live' && !chart.element.querySelector('.chart:hover')) chart.render();
+  };
 
   // Both Realtime graphs start from recent history, so they have a line straight away.
   async function healthSeries() {
@@ -261,14 +264,29 @@ export async function routerDetail({ id }, { reload }) {
   });
 
   const portRows = h('div', null);
+  const portCells = new Map();
+
+  // Updates cells where they are, because a table rebuilt every second would lose clicks.
+  function updatePorts() {
+    for (const iface of ports) {
+      const cells = portCells.get(iface.id);
+      if (!cells) continue;
+      cells.status.replaceChildren(portBadge(iface));
+      cells.in.textContent = formatBits(iface.inBps);
+      cells.out.textContent = formatBits(iface.outBps);
+    }
+  }
 
   function renderPorts(list) {
+    portCells.clear();
     portRows.replaceChildren(
       list.length
         ? table(
             [{ label: 'Interface' }, { label: 'Status' }, { label: 'Speed' }, { label: 'In' }, { label: 'Out' }, { label: 'Errors since boot' }, { label: 'Drops since boot' }],
-            list.map((iface) =>
-              h(
+            list.map((iface) => {
+              const cells = { status: h('td', null, portBadge(iface)), in: h('td', { class: 'nowrap' }, formatBits(iface.inBps)), out: h('td', { class: 'nowrap' }, formatBits(iface.outBps)) };
+              portCells.set(iface.id, cells);
+              return h(
                 'tr',
                 { class: iface.id === selected?.id ? 'selected' : '' },
                 h(
@@ -289,14 +307,14 @@ export async function routerDetail({ id }, { reload }) {
                   ),
                   iface.alias ? h('div', { class: 'muted' }, iface.alias) : '',
                 ),
-                h('td', null, portBadge(iface)),
+                cells.status,
                 h('td', { class: 'nowrap' }, formatSpeed(iface.speedMbps)),
-                h('td', { class: 'nowrap' }, formatBits(iface.inBps)),
-                h('td', { class: 'nowrap' }, formatBits(iface.outBps)),
+                cells.in,
+                cells.out,
                 h('td', null, iface.errors.toLocaleString()),
                 h('td', null, iface.discards.toLocaleString()),
-              ),
-            ),
+              );
+            }),
           )
         : emptyState('No interfaces yet', 'They appear after the first successful poll.'),
     );
@@ -504,42 +522,49 @@ export async function routerDetail({ id }, { reload }) {
   );
   whileShown(view, refresh);
 
+  let reading = false;
   const live = setInterval(async () => {
     if (!document.contains(view)) {
       clearInterval(live);
       return;
     }
-    if (document.hidden || document.querySelector('dialog[open]')) return;
+    if (reading || document.hidden || document.querySelector('dialog[open]')) return;
+    reading = true;
     let sample;
     try {
       sample = await get(`/api/admin/routers/${id}/live`);
     } catch {
       return; // A missed reading leaves a gap, and the next one carries on.
+    } finally {
+      reading = false;
     }
     liveAt = Date.now();
 
-    const readings = new Map(sample.interfaces.map((reading) => [reading.id, reading]));
+    const readings = new Map(sample.interfaces.map((row) => [row.id, row]));
     ports = ports.map((iface) => {
-      const reading = readings.get(iface.id);
-      if (!reading) return iface;
-      return { ...iface, oper: reading.oper, inBps: reading.in_bps ?? iface.inBps, outBps: reading.out_bps ?? iface.outBps };
+      const row = readings.get(iface.id);
+      if (!row) return iface;
+      return { ...iface, oper: row.oper, inBps: row.in_bps ?? iface.inBps, outBps: row.out_bps ?? iface.outBps };
     });
     selected = ports.find((iface) => iface.id === selected?.id) ?? selected;
-    renderPorts(ports);
-    sessions = sample.bgp;
-    renderSessions();
-    renderLog();
+    updatePorts();
     current = { ...current, cpu: sample.cpu ?? current.cpu, memory: sample.memory ?? current.memory };
     renderHead(current);
 
+    if (sample.bgp) {
+      sessions = sample.bgp;
+      if (!bgpRows.matches(':hover')) renderSessions();
+      if (!bgpLog.matches(':hover')) renderLog();
+    }
+
     if (healthRows && sample.ts > (healthRows.at(-1)?.ts ?? 0)) {
       healthRows = [...healthRows, { ts: sample.ts, cpu: sample.cpu, memory: sample.memory }].slice(-LIVE_POINTS);
-      if (health.range() === 'live') health.render();
+      redraw(health);
     }
-    const reading = readings.get(selected?.id);
-    if (reading?.in_bps !== null && reading && liveFor === selected.id && sample.ts > (liveRows.at(-1)?.ts ?? 0)) {
-      liveRows = [...liveRows, { ts: sample.ts, in_bps: reading.in_bps, out_bps: reading.out_bps }].slice(-LIVE_POINTS);
-      if (traffic.range() === 'live') traffic.render();
+    const row = readings.get(selected?.id);
+    if (row && row.in_bps !== null && liveFor === selected.id && sample.ts > (liveRows.at(-1)?.ts ?? 0)) {
+      liveRows = [...liveRows, { ts: sample.ts, in_bps: row.in_bps, out_bps: row.out_bps }].slice(-LIVE_POINTS);
+      redraw(traffic);
     }
   }, LIVE_MS);
 

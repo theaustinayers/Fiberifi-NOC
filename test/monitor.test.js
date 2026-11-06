@@ -227,7 +227,7 @@ describe('monitor', () => {
     });
 
     test('CPU falls back to the polled figure until it has two readings', async () => {
-      assert.equal((await live.liveSample(router.id, start + 6000)).cpu, 12);
+      assert.equal((await live.liveSample(router.id, start + 5500)).cpu, 12);
     });
 
     test('readings inside the minimum gap are shared, not repeated', () => {
@@ -247,6 +247,45 @@ describe('monitor', () => {
     test('a pause with no ticks keeps the last CPU figure instead of dividing by zero', async () => {
       reads.push(reading(2_000_000n, 100_000n, { idle: 1075, total: 2100 }));
       assert.equal((await live.liveSample(router.id, start + 15000)).cpu, 25);
+    });
+
+    test('a second read between counter refreshes holds the rate instead of showing zero', async () => {
+      const held = reading(2_000_000n, 100_000n);
+      reads.push(held);
+      const sample = await live.liveSample(router.id, start + 16000);
+      assert.equal(eth1(sample).in_bps, ((2_000_000 - 1_876_000) * 8) / 5, 'still the last real rate');
+      assert.ok(eth1(sample).in_bps > 0);
+    });
+
+    test('counters that stay still past the refresh window really are idle', async () => {
+      reads.push(reading(2_000_000n, 100_000n));
+      const sample = await live.liveSample(router.id, start + 20000);
+      assert.equal(eth1(sample).in_bps, 0);
+      assert.equal(eth1(sample).out_bps, 0);
+    });
+
+    test('a refresh is measured over the time since the counters last moved', async () => {
+      reads.push(reading(2_000_000n + 375_000n, 100_000n));
+      const sample = await live.liveSample(router.id, start + 23000);
+      assert.equal(eth1(sample).in_bps, 1_000_000);
+    });
+
+    test('BGP is read less often than the rest', async () => {
+      const seen = [];
+      const m = createMonitor(liveDb, {
+        appSecret: SECRET,
+        snmpLiveReader: async (host, creds, options) => {
+          seen.push(options.includeBgp);
+          return reading(1n, 1n);
+        },
+      });
+      const t = start + 100000;
+      const first = await m.liveSample(router.id, t);
+      const second = await m.liveSample(router.id, t + 1000);
+      await m.liveSample(router.id, t + 2000);
+      const third = await m.liveSample(router.id, t + 6000);
+      assert.deepEqual(seen, [true, false, false, true]);
+      assert.ok(first.bgp && !second.bgp && third.bgp);
     });
 
     test('two people watching at once make one request', async () => {
@@ -270,7 +309,7 @@ describe('monitor', () => {
 
     test('a failed reading says so, and does not change the router status', async () => {
       reads.push(new Error('Request timed out'));
-      await assert.rejects(live.liveSample(router.id, start + 25000), { code: 'snmp_error' });
+      await assert.rejects(live.liveSample(router.id, start + 30000), { code: 'snmp_error' });
       assert.equal(live.routerDetail(router.id).status, 'up');
     });
 
