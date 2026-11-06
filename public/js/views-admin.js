@@ -900,6 +900,82 @@ export async function datacenters() {
   );
 }
 
+// Real prefixes only, nested by what contains what, with the first level open. A prefix whose parent is in
+// another datacenter starts its own branch here.
+function prefixTree(list) {
+  const here = new Set(list.map((p) => p.id));
+  const childrenOf = new Map();
+  for (const p of list) {
+    const parent = here.has(p.parentId) ? p.parentId : null;
+    if (!childrenOf.has(parent)) childrenOf.set(parent, []);
+    childrenOf.get(parent).push(p);
+  }
+  const kids = (id) => childrenOf.get(id) ?? [];
+  const open = new Set(kids(null).map((p) => p.id));
+  const holder = h('div', null);
+
+  // Closing a prefix closes everything opened beneath it.
+  function close(id) {
+    open.delete(id);
+    kids(id).forEach((child) => close(child.id));
+  }
+
+  function toggle(p) {
+    if (open.has(p.id)) close(p.id);
+    else open.add(p.id);
+    render();
+    holder.querySelector(`[data-prefix="${p.id}"]`)?.focus();
+  }
+
+  function row(p, depth) {
+    const inside = kids(p.id).length;
+    const expanded = open.has(p.id);
+    return h(
+      'tr',
+      null,
+      h(
+        'td',
+        { class: 'nowrap' },
+        h('span', { class: 'indent', style: { width: `${depth * 20}px` } }),
+        inside
+          ? h(
+              'button',
+              {
+                class: `chev ${expanded ? 'open' : ''}`,
+                type: 'button',
+                'data-prefix': p.id,
+                'aria-expanded': String(expanded),
+                'aria-label': `${expanded ? 'Close' : 'Open'} ${p.cidr}`,
+                onClick: () => toggle(p),
+              },
+              icon('chevron', 14),
+            )
+          : h('span', { class: 'chev-space' }),
+        prefixLink(p),
+        inside && !expanded ? h('span', { class: 'muted' }, ` ${inside} inside`) : '',
+      ),
+      h('td', null, statusBadge(p)),
+      h('td', null, ownerName(p)),
+      h('td', null, p.vlan ?? ''),
+      h('td', { class: 'break' }, p.description),
+    );
+  }
+
+  const rowsFor = (p, depth) => [row(p, depth), ...(open.has(p.id) ? kids(p.id).flatMap((child) => rowsFor(child, depth + 1)) : [])];
+
+  function render() {
+    holder.replaceChildren(
+      table(
+        [{ label: 'Prefix' }, { label: 'Status' }, { label: 'Customer' }, { label: 'VLAN' }, { label: 'Description' }],
+        kids(null).flatMap((p) => rowsFor(p, 0)),
+      ),
+    );
+  }
+
+  render();
+  return holder;
+}
+
 export async function datacenterDetail({ id }, { reload }) {
   const { datacenter, prefixes: list } = await get(`/api/admin/datacenters/${id}`);
 
@@ -948,22 +1024,7 @@ export async function datacenterDetail({ id }, { reload }) {
       h('section', { class: 'panel' }, h('dl', { class: 'facts' }, fact('Address', datacenter.address), fact('Notes', datacenter.notes))),
     panel(
       'Prefixes',
-      list.length
-        ? table(
-            [{ label: 'Prefix' }, { label: 'Status' }, { label: 'Customer' }, { label: 'VLAN' }, { label: 'Description' }],
-            list.map((p) =>
-              h(
-                'tr',
-                null,
-                h('td', { class: 'nowrap' }, prefixLink(p)),
-                h('td', null, statusBadge(p)),
-                h('td', null, ownerName(p)),
-                h('td', null, p.vlan ?? ''),
-                h('td', { class: 'break' }, p.description),
-              ),
-            ),
-          )
-        : emptyState('No prefixes here yet', 'Choose this datacenter when you allocate or edit a prefix.'),
+      list.length ? prefixTree(list) : emptyState('No prefixes here yet', 'Choose this datacenter when you allocate or edit a prefix.'),
     ),
   );
 }
