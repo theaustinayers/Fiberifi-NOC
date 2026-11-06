@@ -118,7 +118,7 @@ export async function routerSync(params, { reload }) {
               h('td', null, change.op === 'add' ? badge('Add', 'good') : badge('Remove', 'bad')),
               h('td', { class: 'mono nowrap' }, change.address),
               h('td', { class: 'mono nowrap' }, change.cidr ?? ''),
-              h('td', null, change.owner ?? ''),
+              h('td', null, change.owner ?? '', change.note ? h('div', { class: 'muted' }, change.note) : ''),
               h('td', { class: 'mono break muted' }, change.command),
             );
           }),

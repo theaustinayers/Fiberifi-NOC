@@ -117,14 +117,51 @@ describe('router changes', () => {
     ipam.applyDelete(ipam.planDelete(conflicting.id, false));
   });
 
+  test('a subnet sharing a main range IP can be added, and removing it leaves the range alone', async () => {
+    const carved = ipam.carve({ cidr: '206.168.244.0/27', customerId: customer, datacenterId: dc });
+    const plan = await sync.plan();
+    const change = plan.changes.find((c) => c.address === '206.168.244.1/27');
+    assert.equal(change.op, 'add');
+    assert.equal(change.note, 'Shares its IP with 206.168.244.1/22');
+    assert.equal(plan.conflicts.length, 0);
+
+    await sync.apply([change.id]);
+    assert.ok(router.addresses.has('206.168.244.1/27'));
+    assert.ok(router.addresses.has('206.168.244.1/22'));
+    assert.ok(!ids(await sync.plan()).includes(change.id), 'already there, so it stops being offered');
+
+    ipam.unassignPrefix(carved.id);
+    const after = await sync.plan();
+    assert.ok(ids(after).includes('remove:206.168.244.1/27'));
+    assert.ok(!ids(after).includes('remove:206.168.244.1/22'));
+    await sync.apply(['remove:206.168.244.1/27']);
+    assert.ok(router.addresses.has('206.168.244.1/22'), 'the main range is untouched');
+    ipam.applyDelete(ipam.planDelete(carved.id, false));
+  });
+
+  test('the first block of a main range works at any size', async () => {
+    for (const [cidr, gateway] of [['206.168.244.0/30', '206.168.244.1/30'], ['206.168.244.0/26', '206.168.244.1/26'], ['206.168.244.0/25', '206.168.244.1/25'], ['149.112.89.0/28', '149.112.89.1/28'], ['149.112.89.0/25', '149.112.89.1/25']]) {
+      const carved = ipam.carve({ cidr, customerId: customer, datacenterId: dc });
+      const plan = await sync.plan();
+      const change = plan.changes.find((c) => c.address === gateway);
+      assert.ok(change, cidr);
+      assert.equal(change.op, 'add', cidr);
+      assert.match(change.note, /^Shares its IP with/, cidr);
+      assert.equal(plan.conflicts.length, 0, cidr);
+      ipam.unassignPrefix(carved.id);
+      ipam.applyDelete(ipam.planDelete(carved.id, false));
+    }
+  });
+
   test('applying sends only address changes on the one interface, then saves', async () => {
+    const savesBefore = router.saves;
     const applied = await sync.apply(['add:206.168.244.233/29', 'add:206.168.245.17/29']);
     assert.equal(applied.length, 2);
     assert.deepEqual(router.configured.at(-1), [
       { op: 'set', path: ['interfaces', 'ethernet', 'eth7', 'address', '206.168.244.233/29'] },
       { op: 'set', path: ['interfaces', 'ethernet', 'eth7', 'address', '206.168.245.17/29'] },
     ]);
-    assert.equal(router.saves, 1);
+    assert.equal(router.saves, savesBefore + 1);
     assert.deepEqual(ids(await sync.plan()), []);
   });
 

@@ -140,9 +140,12 @@ export function createSync(db, config, ipam) {
         adopt.run(address, info.owner, info.cidr);
         continue;
       }
-      const ip = address.split('/')[0];
-      if (ips.has(ip)) conflicts.push({ address, cidr: info.cidr, existing: ips.get(ip) });
-      else changes.push({ id: `add:${address}`, op: 'add', address, cidr: info.cidr, owner: info.owner });
+      const existing = ips.get(address.split('/')[0]);
+      // A subnet at the start of a main range shares that range's IP. Linux keeps the two independently,
+      // so this is safe, and removing the smaller one later leaves the main range alone.
+      const sharesMainRange = existing && isMainRange(existing);
+      if (existing && !sharesMainRange) conflicts.push({ address, cidr: info.cidr, existing });
+      else changes.push({ id: `add:${address}`, op: 'add', address, cidr: info.cidr, owner: info.owner, note: sharesMainRange ? `Shares its IP with ${existing}` : '' });
     }
 
     const remembered = known();
