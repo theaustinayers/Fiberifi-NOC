@@ -265,9 +265,9 @@ export async function prefixes() {
 
 // ---- prefix detail ----
 
-async function allocateDialog(prefix, reload, presetLength) {
+async function allocateDialog(prefix, reload, presetCidr = '') {
   const maxLength = prefix.family === 4 ? 32 : 128;
-  const suggested = presetLength ?? Math.min(prefix.length + (prefix.family === 4 ? 5 : 16), maxLength);
+  const suggested = Math.min(prefix.length + (prefix.family === 4 ? 5 : 16), maxLength);
   const datacenters = await datacenterOptions('Choose a datacenter');
   if (datacenters.length === 1) {
     toast('Add a datacenter first.', 'warn');
@@ -278,9 +278,16 @@ async function allocateDialog(prefix, reload, presetLength) {
     title: `Allocate from ${prefix.cidr}`,
     intro: prefix.customer
       ? `Adds a label inside ${customerName(prefix.customer)}'s subnet. It stays theirs and their addresses are not affected.`
-      : `Takes the first free block of the size you choose. Use /${prefix.length} for the whole prefix.`,
+      : `Enter the exact subnet you want, or leave it blank to take the next free block of the length below. Use /${prefix.length} for the whole prefix.`,
     submitLabel: 'Allocate subnet',
     fields: [
+      {
+        name: 'cidr',
+        label: 'Subnet (optional)',
+        value: presetCidr,
+        mono: true,
+        placeholder: prefix.family === 4 ? '206.168.244.240/29' : '2607:9340:1::/48',
+      },
       [
         { name: 'length', label: 'Prefix length', type: 'number', value: suggested, min: prefix.length, max: maxLength, required: true },
         !prefix.customer && { name: 'customerId', label: 'Customer', type: 'select', value: '', options: await ownerOptions() },
@@ -291,10 +298,16 @@ async function allocateDialog(prefix, reload, presetLength) {
         { name: 'vlan', label: 'VLAN (optional)', type: 'number', min: 1, max: 4094 },
       ],
     ],
-    onInput: async ({ length }, setNote) => {
+    onInput: async ({ cidr, length }, setNote) => {
+      const typed = cidr.trim();
+      const lengthField = document.querySelector('dialog [name=length]');
+      if (lengthField) lengthField.disabled = Boolean(typed);
+      const query = typed ? `cidr=${encodeURIComponent(typed)}` : `length=${encodeURIComponent(length)}`;
       try {
-        const { next } = await get(`/api/admin/prefixes/${prefix.id}/next-available?length=${encodeURIComponent(length)}`);
+        const { next } = await get(`/api/admin/prefixes/${prefix.id}/next-available?${query}`);
         if (next?.whole) setNote(`Uses all of ${next.cidr}. Prefixes already inside it stay as they are.`);
+        else if (next?.overlaps) setNote(`Creates ${next.cidr}. It overlaps ${next.overlaps}, so it can only be a label, not assigned to another customer.`);
+        else if (next?.exact) setNote(`Creates ${next.cidr} (${next.size} addresses).`);
         else setNote(next ? `Next free: ${next.cidr} (${next.size} addresses)` : `No free /${length} left in this prefix.`);
       } catch (error) {
         setNote(error.message);
@@ -491,7 +504,7 @@ function subnetsTab(prefix, reload) {
             h(
               'td',
               { class: 'right' },
-              h('button', { class: 'btn sm', type: 'button', onClick: () => allocateDialog(prefix, reload, f.length) }, 'Allocate'),
+              h('button', { class: 'btn sm', type: 'button', onClick: () => allocateDialog(prefix, reload, f.cidr) }, 'Allocate'),
             ),
           ),
         ),

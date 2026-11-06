@@ -946,6 +946,69 @@ describe('NOC API', () => {
     });
   });
 
+  describe('allocating an exact subnet', () => {
+    let parent;
+    const url = () => `/api/admin/prefixes/${parent.id}/allocate`;
+    const check = (cidr) => admin.get(`/api/admin/prefixes/${parent.id}/next-available?cidr=${encodeURIComponent(cidr)}`);
+
+    before(async () => {
+      const { data } = await admin.get('/api/admin/prefixes');
+      parent = data.prefixes.find((p) => p.cidr === '206.168.244.0/22');
+    });
+
+    test('it takes exactly what was typed, skipping earlier free space', async () => {
+      const res = await admin.post(url(), { cidr: '206.168.245.240/29', length: 29, customerId: acmeId, datacenterId, description: 'Rack 9' });
+      assert.equal(res.status, 201, JSON.stringify(res.data));
+      assert.equal(res.data.prefix.cidr, '206.168.245.240/29');
+      assert.equal(res.data.prefix.customer.id, acmeId);
+      assert.equal(res.data.prefix.description, 'Rack 9');
+      const { data } = await acme.get('/api/subnets');
+      assert.ok(data.subnets.some((s) => s.cidr === '206.168.245.240/29'));
+    });
+
+    test('blank still takes the next free block', async () => {
+      const res = await admin.post(url(), { cidr: '', length: 30, datacenterId });
+      assert.equal(res.status, 201, JSON.stringify(res.data));
+      assert.notEqual(res.data.prefix.cidr, '206.168.245.240/30');
+      await admin.delete(`/api/admin/prefixes/${res.data.prefix.id}`);
+    });
+
+    test('bad input is refused with a clear reason', async () => {
+      const cases = [
+        ['149.112.89.0/29', /is not inside 206\.168\.244\.0\/22/],
+        ['2607:9340::/48', /is not inside/],
+        ['206.168.245.241/29', /Did you mean 206\.168\.245\.240\/29/],
+        ['nonsense', /not a valid|prefix length/],
+      ];
+      for (const [cidr, message] of cases) {
+        const res = await admin.post(url(), { cidr, datacenterId });
+        assert.equal(res.status, 400, cidr);
+        assert.equal(res.data.error.field, 'cidr');
+        assert.match(res.data.error.message, message);
+      }
+      assert.equal((await admin.post(url(), { cidr: '206.168.245.128/29' })).status, 400, 'a datacenter is still required');
+      assert.equal((await admin.post(url(), { cidr: '206.168.245.240/29', datacenterId })).status, 409, 'it already exists');
+    });
+
+    test('one customer cannot be given another customer block', async () => {
+      const res = await admin.post(url(), { cidr: '206.168.245.240/30', customerId: globexId, datacenterId });
+      assert.equal(res.status, 409);
+      assert.equal(res.data.error.code, 'assignment_overlap');
+    });
+
+    test('the live check explains what will happen', async () => {
+      assert.equal((await check('206.168.245.192/29')).data.next.exact, true);
+      assert.equal((await check('206.168.245.240/30')).data.next.overlaps, '206.168.245.240/29');
+      assert.equal((await check('206.168.244.0/22')).data.next.whole, true);
+      assert.equal((await check('206.168.245.240/29')).status, 409);
+      assert.equal((await check('149.112.89.0/29')).status, 400);
+    });
+
+    test('customers cannot use it', async () => {
+      assert.equal((await acme.post(url(), { cidr: '206.168.245.128/29', datacenterId })).status, 403);
+    });
+  });
+
   describe('prefix ownership', () => {
     let mine;
     let theirs;

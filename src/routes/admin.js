@@ -103,7 +103,8 @@ export function adminRoutes({ db, ipam, rdns, team, audit }) {
   });
 
   router.get('/prefixes/:id/next-available', (req, res) => {
-    res.json({ next: ipam.suggestNext(req.params.id, req.query.length) });
+    const { cidr, length } = req.query;
+    res.json({ next: cidr ? ipam.checkBlock(req.params.id, cidr) : ipam.suggestNext(req.params.id, length) });
   });
 
   router.post('/prefixes/:id/allocate', (req, res) => {

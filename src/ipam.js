@@ -505,6 +505,25 @@ export function createIpam(db) {
     return n;
   }
 
+  // A block the admin typed in, which has to sit inside the prefix they are allocating from.
+  function blockInside(row, cidrText) {
+    const p = asApiError(() => parseCidr(cidrText));
+    const parent = bounds(row);
+    if (p.family !== row.family || p.network < parent.network || p.last > parent.last) {
+      throw invalid(`${p.cidr} is not inside ${row.cidr}`, 'cidr');
+    }
+    return p;
+  }
+
+  function checkBlock(id, cidrText) {
+    const row = requirePrefix(id);
+    const p = blockInside(row, cidrText);
+    if (p.cidr === row.cidr) return { cidr: p.cidr, size: sizeLabel(p.family, p.length), whole: true };
+    assertUnique(p.cidr);
+    const clash = q.customerOverlap.get(p.family, 0, toHex(p.last), toHex(p.network));
+    return { cidr: p.cidr, size: sizeLabel(p.family, p.length), exact: true, overlaps: clash?.cidr ?? null };
+  }
+
   function suggestNext(id, length) {
     const row = requirePrefix(id);
     if (Number(length) === row.length) return { cidr: row.cidr, size: sizeLabel(row.family, row.length), whole: true };
@@ -531,6 +550,10 @@ export function createIpam(db) {
 
   function allocate(id, input) {
     const whole = requirePrefix(id);
+    if (input.cidr) {
+      const block = blockInside(whole, input.cidr);
+      return block.cidr === whole.cidr ? useWhole(whole, input) : carve(input);
+    }
     if (Number(input.length) === whole.length) return useWhole(whole, input);
     return transaction(db, () => {
       const row = requirePrefix(id);
@@ -932,6 +955,7 @@ export function createIpam(db) {
     unassignPrefix,
     suggestNext,
     allocate,
+    checkBlock,
     carve,
     explore,
     split,
