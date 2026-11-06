@@ -210,9 +210,9 @@ describe('NOC API', () => {
       assert.equal((await acme.put(`/api/subnets/${id}/rdns/${ip}`, { hostname: 'a.example.com' })).status, 403, ip);
     }
     assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.1`, { hostname: 'gw' })).status, 200);
-    assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.7`, { hostname: 'bc' })).status, 200);
-    assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.0`, { hostname: 'net' })).status, 200);
-    for (const last of [0, 1, 7]) await admin.delete(`/api/subnets/${id}/addresses/149.112.89.${last}`);
+    assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.7`, { hostname: 'bc' })).status, 403);
+    assert.equal((await admin.put(`/api/subnets/${id}/addresses/149.112.89.0`, { hostname: 'net' })).status, 403);
+    await admin.delete(`/api/subnets/${id}/addresses/149.112.89.1`);
   });
 
   test('a customer can keep address records in their own space only', async () => {
@@ -695,7 +695,8 @@ describe('NOC API', () => {
       assert.equal(by['149.112.89.9'].role, 'gateway');
       assert.equal(by['149.112.89.9'].locked, false, 'admins can edit the gateway');
       assert.equal(by['149.112.89.15'].role, 'broadcast');
-      assert.equal(by['149.112.89.15'].locked, false, 'admins can edit any row');
+      assert.equal(by['149.112.89.15'].locked, true, 'blocked for admins too');
+      assert.equal(by['149.112.89.8'].locked, true, 'blocked for admins too');
       assert.equal(by['149.112.89.10'].locked, false);
       assert.equal(by['149.112.89.10'].customer.id, globexId);
       assert.ok(by['149.112.89.10'].prefixId);
@@ -891,11 +892,11 @@ describe('NOC API', () => {
 
       const end = await rows('206.168.247.240/28', 32);
       assert.equal(end['206.168.247.255'].role, 'broadcast');
-      assert.equal(end['206.168.247.255'].locked, false, 'admins can edit any row');
+      assert.equal(end['206.168.247.255'].locked, true);
       assert.equal(end['206.168.247.254'].role, null);
     });
 
-    test('admins can edit any row and move the gateway, but not onto the broadcast', async () => {
+    test('network and broadcast are blocked for admins, and the gateway can be moved', async () => {
       const { data } = await admin.get('/api/admin/prefixes');
       const range = data.prefixes.find((p) => p.cidr === '2607:9340::/32');
       assert.equal(range.gateway, '2607:9340::1');
@@ -903,8 +904,9 @@ describe('NOC API', () => {
 
       const target = data.prefixes.find((p) => p.cidr === '206.168.244.0/22');
       const url = `/api/subnets/${target.id}/addresses`;
-      assert.equal((await admin.put(`${url}/206.168.247.255`, { hostname: 'x' })).status, 200);
-      assert.equal((await admin.delete(`${url}/206.168.247.255`)).status, 200);
+      assert.equal((await admin.put(`${url}/206.168.247.255`, { hostname: 'x' })).status, 403);
+      assert.equal((await admin.put(`${url}/206.168.244.0`, { hostname: 'x' })).status, 403);
+      assert.equal((await admin.delete(`${url}/206.168.247.255`)).status, 403);
       const moved = await admin.patch(`/api/admin/prefixes/${target.id}`, { gateway: '206.168.247.254' });
       assert.equal(moved.status, 200, JSON.stringify(moved.data));
       assert.equal(moved.data.prefix.gateway, '206.168.247.254');

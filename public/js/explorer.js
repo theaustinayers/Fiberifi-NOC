@@ -1,6 +1,6 @@
 // The drill-down on the Prefixes page: open a range into smaller blocks, all the way to single addresses.
 // Blocks do not have to exist as prefixes. They are worked out on the server from what is assigned right now.
-import { editAddress, rowClass, STATUS } from './addresses.js';
+import { editAddress, removePtrButton, rowClass, STATUS } from './addresses.js';
 import { badge, formDialog, get, go, h, icon, meter, plural, post, toast } from './lib.js';
 
 const REFRESH_MS = 15000;
@@ -161,6 +161,16 @@ export function explorerTable(aggregates, { datacenterOptions, ownerOptions }) {
   }
 
   function addressRow(row, depth) {
+    if (row.locked) {
+      return h(
+        'tr',
+        { class: 'locked', title: 'This address cannot be edited.' },
+        h('td', { class: 'mono nowrap' }, indent(depth + 1), row.ip),
+        h('td', null, h('span', { class: 'lock' }, icon('lock', 14), ROLE_LABEL[row.role])),
+        h('td', { colSpan: 5, class: 'mono' }, row.rdns?.hostname ?? ''),
+        h('td', { class: 'right' }, row.rdns ? removePtrButton(row.prefixId, row, render) : ''),
+      );
+    }
     const status = row.record ? STATUS[row.record.status] : null;
     return h(
       'tr',

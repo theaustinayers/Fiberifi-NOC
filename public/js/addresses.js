@@ -29,10 +29,25 @@ function addressUrl(subnetId, ip, kind = 'addresses') {
   return `/api/subnets/${subnetId}/${kind}/${encodeURIComponent(ip)}`;
 }
 
-// Network and broadcast stay greyed so they stand out, even for admins who can open them.
 export function rowClass(row) {
-  if (row.role === 'network' || row.role === 'broadcast') return 'reserved';
   return row.record || row.rdns || row.role ? '' : 'free';
+}
+
+// A sync can import a PTR onto a blocked address, so admins get a way to clear it.
+export function removePtrButton(subnetId, row, reload) {
+  return h(
+    'button',
+    {
+      class: 'btn sm danger',
+      type: 'button',
+      onClick: async () => {
+        await del(addressUrl(subnetId, row.ip, 'rdns'));
+        toast(`Removed the PTR for ${row.ip}`);
+        reload();
+      },
+    },
+    'Remove PTR',
+  );
 }
 
 export function editAddress(subnetId, row, onChange) {
@@ -52,11 +67,8 @@ export function editAddress(subnetId, row, onChange) {
   };
   const ptrInitial = row.rdns?.hostname ?? '';
   let ptrHint = 'Goes live in public DNS when you save. Clear it to remove the PTR.';
-  const noPtr = row.role === 'network' || row.role === 'broadcast';
   if (readOnly) {
     ptrHint = '';
-  } else if (noPtr) {
-    ptrHint = `The ${row.role} address cannot have a PTR.${row.rdns ? ' Clear this field to remove it.' : ''}`;
   } else if (!session.rdnsEnabled) {
     ptrHint = isAdmin ? 'Add a Cloudflare API token in Settings to manage PTR records.' : 'Reverse DNS is not available yet. Contact Fiberifi support.';
   }
@@ -119,7 +131,7 @@ export function editAddress(subnetId, row, onChange) {
             value: ptrInitial,
             placeholder: 'mail.example.com',
             mono: true,
-            disabled: !session.rdnsEnabled || (noPtr && !row.rdns),
+            disabled: !session.rdnsEnabled,
             hint: ptrHint,
           },
         ].map(lock),
@@ -136,7 +148,14 @@ function rowFor(subnetId, row, reload) {
       'tr',
       { class: 'locked', title: 'This address cannot be edited.' },
       h('td', { class: 'mono nowrap' }, row.ip),
-      h('td', { colSpan: 5 }, h('span', { class: 'lock' }, icon('lock', 14), ROLE_LABEL[row.role])),
+      h('td', { colSpan: row.rdns ? 4 : 5 }, h('span', { class: 'lock' }, icon('lock', 14), ROLE_LABEL[row.role])),
+      row.rdns &&
+        h(
+          'td',
+          { class: 'mono break' },
+          row.rdns.hostname,
+          session.user.role === 'admin' && [' ', removePtrButton(subnetId, row, reload)],
+        ),
     );
   }
   const free = !row.record && !row.rdns;

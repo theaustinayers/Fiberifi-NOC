@@ -57,9 +57,10 @@ export function canManageTeam(user) {
   return user.role === 'customer' && canEdit(user);
 }
 
-// Reserved addresses are locked for customers. Admins can edit any row.
+// Network and broadcast are blocked for everyone. Admins can edit the gateway, customers cannot.
 export function isLocked(role, user) {
-  return Boolean(role) && user.role !== 'admin';
+  if (role === 'network' || role === 'broadcast') return true;
+  return role === 'gateway' && user.role !== 'admin';
 }
 
 function likePattern(q) {
