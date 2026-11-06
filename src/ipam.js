@@ -57,10 +57,9 @@ export function canManageTeam(user) {
   return user.role === 'customer' && canEdit(user);
 }
 
-// Network and broadcast are never editable. Admins can edit the gateway, customers cannot.
+// Reserved addresses are locked for customers. Admins can edit any row.
 export function isLocked(role, user) {
-  if (role === 'network' || role === 'broadcast') return true;
-  return role === 'gateway' && user.role !== 'admin';
+  return Boolean(role) && user.role !== 'admin';
 }
 
 function likePattern(q) {
@@ -291,7 +290,6 @@ export function createIpam(db) {
     const status = owned ? (wanted === 'container' ? 'active' : wanted) : statusFor(p, wanted);
     const newId = insertPrefix(p, { ...fields, status });
     if (customerId) {
-      assertNoPtrOnReserved(q.byId.get(newId));
       db.prepare(
         `UPDATE prefixes SET customer_id = ?, assigned_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
       ).run(customerId, newId);
@@ -316,25 +314,7 @@ export function createIpam(db) {
     if (ip.value === defaults.network || ip.value === defaults.broadcast) {
       throw invalid('The gateway cannot be the network or broadcast address', 'gateway');
     }
-    const gateway = formatIp(ip.family, ip.value);
-    if (gateway !== row.gateway && ptrAt(ip.family, ip.value)) {
-      throw invalid(`${gateway} has a PTR record, and gateways cannot have one. Remove it first.`, 'gateway');
-    }
-    return gateway;
-  }
-
-  function ptrAt(family, value) {
-    return db.prepare('SELECT hostname FROM rdns_records WHERE family = ? AND ip_hex = ?').get(family, toHex(value));
-  }
-
-  // PTRs are for usable addresses only, so a subnet cannot be handed over with one on a reserved address.
-  function assertNoPtrOnReserved(row) {
-    for (const [role, value] of Object.entries(rolesOf(row))) {
-      if (value !== null && ptrAt(row.family, value)) {
-        const ip = formatIp(row.family, value);
-        throw new ApiError(409, 'ptr_on_reserved', `${ip} would be the ${role} address but has a PTR record. Remove it first.`);
-      }
-    }
+    return formatIp(ip.family, ip.value);
   }
 
   function requireCustomer(id) {
@@ -486,7 +466,6 @@ export function createIpam(db) {
       assertNoAssignedOverlap(row.family, row.id, row.start_hex, row.end_hex);
       const active = { ...row, status: row.status === 'container' ? 'active' : row.status };
       const gatewayAddress = cleanGateway(gateway, active);
-      assertNoPtrOnReserved({ ...active, gateway: gatewayAddress });
       db.prepare(
         `UPDATE prefixes SET customer_id = ?, gateway = ?, status = ?,
          assigned_at = COALESCE(assigned_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -831,14 +810,15 @@ export function createIpam(db) {
     return ip;
   }
 
-  // Stricter than editableAddress: nobody, admins included, can publish a PTR on a reserved address.
-  // Admins can still remove one, because a sync can import a PTR that was already there.
+  // Customers can only publish PTRs on usable addresses. Admins can also publish one on a gateway.
+  // Nobody can on a network or broadcast address, but admins can clear one a sync brought in.
   function ptrAddress(row, ipText, user, { removing = false } = {}) {
     assertCanEdit(user);
     const ip = resolveAddress(row, ipText);
     const role = roleAt(ip.family, ip.value);
-    if (role && !(removing && user.role === 'admin')) {
-      throw new ApiError(403, 'locked', `PTR records can only be set on usable addresses. This is the ${role} address.`);
+    const allowed = !role || (user.role === 'admin' && (role === 'gateway' || removing));
+    if (!allowed) {
+      throw new ApiError(403, 'locked', `PTR records cannot be set on the ${role} address.`);
     }
     return ip;
   }

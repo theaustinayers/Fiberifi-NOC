@@ -193,7 +193,10 @@ tbody tr:hover td { background: rgb(255 255 255 / 0.018); }
 .indent { display: inline-block; }
 tr.locked td { background: rgb(255 255 255 / 0.02); color: var(--ink-locked); }
 tr.locked:hover td { background: rgb(255 255 255 / 0.02); }
-tr.free .mono { color: var(--ink-2); }
+tr.free .mono:not(.cell-link) { color: var(--ink-2); }
+tr.reserved td { background: rgb(255 255 255 / 0.02); color: var(--ink-locked); }
+tr.reserved .cell-link { color: var(--ink-3); }
+tr.reserved .cell-link:hover { color: var(--brand-light); }
 .lock { display: inline-flex; align-items: center; gap: 6px; }
 .chev {
   display: inline-flex; align-items: center; justify-content: center;

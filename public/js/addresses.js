@@ -29,20 +29,10 @@ function addressUrl(subnetId, ip, kind = 'addresses') {
   return `/api/subnets/${subnetId}/${kind}/${encodeURIComponent(ip)}`;
 }
 
-export function removePtrButton(subnetId, row, reload) {
-  return h(
-    'button',
-    {
-      class: 'btn sm danger',
-      type: 'button',
-      onClick: async () => {
-        await del(addressUrl(subnetId, row.ip, 'rdns'));
-        toast(`Removed the PTR for ${row.ip}`);
-        reload();
-      },
-    },
-    'Remove PTR',
-  );
+// Network and broadcast stay greyed so they stand out, even for admins who can open them.
+export function rowClass(row) {
+  if (row.role === 'network' || row.role === 'broadcast') return 'reserved';
+  return row.record || row.rdns || row.role ? '' : 'free';
 }
 
 export function editAddress(subnetId, row, onChange) {
@@ -62,12 +52,11 @@ export function editAddress(subnetId, row, onChange) {
   };
   const ptrInitial = row.rdns?.hostname ?? '';
   let ptrHint = 'Goes live in public DNS when you save. Clear it to remove the PTR.';
+  const noPtr = row.role === 'network' || row.role === 'broadcast';
   if (readOnly) {
     ptrHint = '';
-  } else if (row.role) {
-    ptrHint = row.rdns
-      ? 'Gateways cannot have a PTR. Clear this field to remove it.'
-      : 'Gateways cannot have a PTR. To use a different address as the gateway, choose Edit on the prefix.';
+  } else if (noPtr) {
+    ptrHint = `The ${row.role} address cannot have a PTR.${row.rdns ? ' Clear this field to remove it.' : ''}`;
   } else if (!session.rdnsEnabled) {
     ptrHint = isAdmin ? 'Add a Cloudflare API token in Settings to manage PTR records.' : 'Reverse DNS is not available yet. Contact Fiberifi support.';
   }
@@ -130,7 +119,7 @@ export function editAddress(subnetId, row, onChange) {
             value: ptrInitial,
             placeholder: 'mail.example.com',
             mono: true,
-            disabled: !session.rdnsEnabled || (Boolean(row.role) && !row.rdns),
+            disabled: !session.rdnsEnabled || (noPtr && !row.rdns),
             hint: ptrHint,
           },
         ].map(lock),
@@ -143,25 +132,17 @@ export function editAddress(subnetId, row, onChange) {
 function rowFor(subnetId, row, reload) {
   const statusInfo = row.record ? STATUS[row.record.status] : null;
   if (row.locked) {
-    // A sync can import a PTR that breaks the usable-only rule, so admins get a way to clear it.
     return h(
       'tr',
       { class: 'locked', title: 'This address cannot be edited.' },
       h('td', { class: 'mono nowrap' }, row.ip),
-      h('td', { colSpan: row.rdns ? 4 : 5 }, h('span', { class: 'lock' }, icon('lock', 14), ROLE_LABEL[row.role])),
-      row.rdns &&
-        h(
-          'td',
-          { class: 'mono break' },
-          row.rdns.hostname,
-          session.user.role === 'admin' && [' ', removePtrButton(subnetId, row, reload)],
-        ),
+      h('td', { colSpan: 5 }, h('span', { class: 'lock' }, icon('lock', 14), ROLE_LABEL[row.role])),
     );
   }
   const free = !row.record && !row.rdns;
   return h(
     'tr',
-    { class: free ? 'free' : '' },
+    { class: rowClass(row) },
     h(
       'td',
       { class: 'nowrap' },
