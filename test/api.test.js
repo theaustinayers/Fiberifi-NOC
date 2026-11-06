@@ -1308,7 +1308,7 @@ test('upgrading a live database keeps everything and turns sites into datacenter
   migrate(db);
   migrate(db);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 7);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 8);
   assert.equal(db.prepare('SELECT internal FROM prefixes LIMIT 1').get().internal, 0);
   assert.equal(db.prepare('SELECT account_id FROM rdns_records WHERE ip = ?').get('10.0.0.5').account_id, 1);
   assert.equal(db.prepare('SELECT account_id FROM rdns_records WHERE ip = ?').get('10.0.0.6').account_id, null);

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { createApp } from '../src/app.js';
 import { openDatabase, seed } from '../src/db.js';
-import { toBigInt } from '../src/lib/snmp.js';
+import { cleanDescription, toBigInt } from '../src/lib/snmp.js';
 import { createMonitor, rate } from '../src/monitor.js';
 
 const SECRET = 'test-secret-test-secret-test-secret';
@@ -400,11 +400,34 @@ describe('monitor', () => {
     });
 
     test('a name survives polling, and belongs to its own router', async () => {
-      mon.labelSession(router.id, session().id, { label: 'Neptune-NYC' });
+      mon.labelSession(router.id, session().id, { label: 'Upstream A' });
       await poll(peer({ transitions: 4 }));
-      assert.equal(session().label, 'Neptune-NYC');
+      assert.equal(session().label, 'Upstream A');
       const other = mon.createRouter({ name: 'B2', host: '192.0.2.2' });
       assert.throws(() => mon.bgpEvents(other.id, session().id), { code: 'not_found' });
+    });
+
+    test('a description from the router is stored, updated and cleared', async () => {
+      await poll(peer({ description: 'Upstream A (IPsec)' }));
+      assert.equal(session().description, 'Upstream A (IPsec)');
+      await poll(peer({ description: 'Upstream A (backup)' }));
+      assert.equal(session().description, 'Upstream A (backup)');
+      await poll(peer({ description: '' }));
+      assert.equal(session().description, '');
+    });
+
+    test('a reading without descriptions keeps the stored one', async () => {
+      await poll(peer({ description: 'Kept' }));
+      await poll(peer());
+      assert.equal(session().description, 'Kept');
+      await poll(peer({ description: '' }));
+    });
+
+    test('a description arrives clean', () => {
+      assert.equal(cleanDescription(Buffer.from('Upstream A (IPsec)\0')), 'Upstream A (IPsec)');
+      assert.equal(cleanDescription(Buffer.from('  a\u0007b  ')), 'ab');
+      assert.equal(cleanDescription(undefined), '');
+      assert.equal(cleanDescription('x'.repeat(200)).length, 120);
     });
 
     test('a router with no BGP data just shows none', async () => {

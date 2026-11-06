@@ -95,6 +95,9 @@ function routerFields(router, datacenters) {
   ];
 }
 
+// A name set in the panel wins over the description on the router.
+const sessionName = (session) => session.label || session.description;
+
 async function datacenterOptions() {
   const { datacenters } = await get('/api/admin/datacenters');
   return [{ value: '', label: 'None' }, ...datacenters.map((d) => ({ value: d.id, label: d.code ? `${d.name} (${d.code})` : d.name }))];
@@ -338,7 +341,15 @@ export async function routerDetail({ id }, { reload }) {
       const done = await formDialog({
         title: `Name ${session.peerIp}`,
         submitLabel: 'Save name',
-        fields: [{ name: 'label', label: 'Name', value: session.label, placeholder: 'Neptune-NYC (IPsec)' }],
+        fields: [
+          {
+            name: 'label',
+            label: 'Name',
+            value: session.label,
+            placeholder: session.description || 'Upstream A (IPsec)',
+            hint: session.description ? 'Leave blank to use the description from the router.' : undefined,
+          },
+        ],
         onSubmit: (values) => patch(`/api/admin/routers/${id}/bgp/${session.id}`, values),
       });
       if (done) reload();
@@ -351,8 +362,8 @@ export async function routerDetail({ id }, { reload }) {
         h(
           'div',
           { class: 'panel-head' },
-          h('h2', null, session.label || session.peerIp),
-          h('button', { class: 'btn sm', type: 'button', onClick: rename }, session.label ? 'Rename' : 'Add a name'),
+          h('h2', null, sessionName(session) || session.peerIp),
+          h('button', { class: 'btn sm', type: 'button', onClick: rename }, sessionName(session) ? 'Rename' : 'Add a name'),
         ),
         h(
           'dl',
@@ -407,9 +418,9 @@ export async function routerDetail({ id }, { reload }) {
                         renderLog();
                       },
                     },
-                    session.label || h('span', { class: 'mono' }, session.peerIp),
+                    sessionName(session) || h('span', { class: 'mono' }, session.peerIp),
                   ),
-                  session.label ? h('div', { class: 'muted mono' }, session.peerIp) : '',
+                  sessionName(session) ? h('div', { class: 'muted mono' }, session.peerIp) : '',
                 ),
                 h('td', { class: 'nowrap' }, session.remoteAs ? `AS${session.remoteAs}` : '—'),
                 h('td', null, bgpBadge(session)),

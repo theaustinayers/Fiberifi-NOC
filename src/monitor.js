@@ -143,6 +143,10 @@ export function createMonitor(db, config) {
     for (const peer of peers) {
       const previous = db.prepare('SELECT * FROM bgp_sessions WHERE router_id = ? AND peer_ip = ?').get(router.id, peer.peerIp);
       upsert.run(router.id, peer.peerIp, peer.localIp, peer.remoteAs, peer.state, peer.admin, peer.inUpdates, peer.outUpdates, peer.inMessages, peer.outMessages, peer.transitions, peer.stateSeconds, peer.lastError, now);
+      // Only the background poll reads these, so a live reading leaves them alone.
+      if (peer.description !== undefined) {
+        db.prepare('UPDATE bgp_sessions SET description = ? WHERE router_id = ? AND peer_ip = ?').run(peer.description, router.id, peer.peerIp);
+      }
       if (!previous) continue;
       const wasUp = previous.state === 'established';
       const isUp = peer.state === 'established';
@@ -368,13 +372,14 @@ export function createMonitor(db, config) {
   // A session gone from the table has been removed from the router's config.
   function bgpSessions(router) {
     return db
-      .prepare(`SELECT * FROM bgp_sessions WHERE router_id = ? AND seen_at >= ? ORDER BY (state = 'established'), COALESCE(NULLIF(label, ''), peer_ip)`)
+      .prepare(`SELECT * FROM bgp_sessions WHERE router_id = ? AND seen_at >= ? ORDER BY (state = 'established'), COALESCE(NULLIF(label, ''), NULLIF(description, ''), peer_ip)`)
       .all(router.id, (router.last_seen ?? 0) - GONE_AFTER_MS)
       .map((row) => ({
         id: row.id,
         peerIp: row.peer_ip,
         localIp: row.local_ip,
         label: row.label,
+        description: row.description,
         remoteAs: row.remote_as,
         state: row.state,
         admin: row.admin,

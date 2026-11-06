@@ -34,6 +34,8 @@ const OID = {
 const HIDDEN_INTERFACES = new Set(['lo', 'pimreg', 'pim6reg']);
 
 const BGP_PEER_TABLE = '1.3.6.1.2.1.15.3.1';
+// BGP4-MIB has no description, so this comes from the newer BGP4V2 table. IPv4 peers only.
+const BGP_DESCRIPTION = '1.3.6.1.3.5.1.1.2.1.14.1.1';
 const BGP_COLUMN = { state: 2, admin: 3, localIp: 5, peerIp: 7, remoteAs: 9, inUpdates: 10, outUpdates: 11, inMessages: 12, outMessages: 13, lastError: 14, transitions: 15, stateSeconds: 16 };
 const BGP_STATE = { 1: 'idle', 2: 'connect', 3: 'active', 4: 'opensent', 5: 'openconfirm', 6: 'established' };
 const BGP_ERROR = { 1: 'Message header error', 2: 'OPEN message error', 3: 'UPDATE message error', 4: 'Hold timer expired', 5: 'Finite state machine error', 6: 'Cease' };
@@ -99,6 +101,33 @@ function bgpError(value) {
   const bytes = Buffer.isBuffer(value) ? value : Buffer.alloc(0);
   if (bytes.length < 2 || !bytes[0]) return '';
   return `${BGP_ERROR[bytes[0]] ?? `Error ${bytes[0]}`} (${bytes[0]}/${bytes[1]})`;
+}
+
+// FRR ends the string with a NUL.
+export function cleanDescription(value) {
+  return text(value).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120);
+}
+
+// Asked for peer by peer, not walked: FRR stops a walk of this column at the first peer with no description,
+// which hides every peer after it. Null means the router could not say, so stored descriptions are kept.
+function readBgpDescriptions(session, peers) {
+  if (!peers.length) return Promise.resolve(new Map());
+  return new Promise((resolve) => {
+    session.get(peers.map((peer) => `${BGP_DESCRIPTION}.${peer.peerIp}`), (error, varbinds) => {
+      if (error) return resolve(null);
+      const found = new Map();
+      varbinds.forEach((varbind, index) => {
+        if (!snmp.isVarbindError(varbind)) found.set(peers[index].peerIp, cleanDescription(varbind.value));
+      });
+      resolve(found);
+    });
+  });
+}
+
+async function readBgpWithDescriptions(session) {
+  const peers = await readBgp(session);
+  const descriptions = await readBgpDescriptions(session, peers);
+  return descriptions ? peers.map((peer) => ({ ...peer, description: descriptions.get(peer.peerIp) ?? '' })) : peers;
 }
 
 // The whole peer table in one walk. Routers without FRR's SNMP module simply return nothing.
@@ -225,7 +254,7 @@ export async function readRouter(host, credentials, { port = 161 } = {}) {
       memory: memoryPercent(values),
       load1: values[OID.load1] === undefined ? null : Number(text(values[OID.load1])),
       interfaces,
-      bgp: await readBgp(session),
+      bgp: await readBgpWithDescriptions(session),
     };
   } finally {
     session.close();

@@ -279,6 +279,11 @@ const MIGRATIONS = [
   (db) => {
     db.exec('CREATE TABLE router_dismissed (change_id TEXT PRIMARY KEY)');
   },
+
+  // 8: the description set on the BGP neighbor on the router itself.
+  (db) => {
+    db.exec(`ALTER TABLE bgp_sessions ADD COLUMN description TEXT NOT NULL DEFAULT ''`);
+  },
 ];
 
 export function migrate(db) {
